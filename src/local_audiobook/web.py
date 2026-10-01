@@ -36,8 +36,10 @@ def create_app(app_root: Path | None = None, workspace: Path | None = None) -> F
     @asynccontextmanager
     async def lifespan(_app):
         manager.start()
-        yield
-        manager.close()
+        try:
+            yield
+        finally:
+            manager.close()
 
     app = FastAPI(title="Local Novel Audiobook", docs_url=None, redoc_url=None, lifespan=lifespan)
     app.state.manager = manager
@@ -49,8 +51,14 @@ def create_app(app_root: Path | None = None, workspace: Path | None = None) -> F
             return JSONResponse({"detail": "This interface accepts loopback hosts only"}, status_code=403)
         origin = request.headers.get("origin")
         if origin:
-            parsed = urlsplit(origin)
-            if parsed.scheme not in {"http", "https"} or parsed.hostname not in {"localhost", "127.0.0.1", "::1"} or parsed.port != request.url.port:
+            try:
+                parsed = urlsplit(origin)
+                allowed = (parsed.scheme in {"http", "https"}
+                           and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+                           and parsed.port == request.url.port)
+            except ValueError:
+                allowed = False
+            if not allowed:
                 return JSONResponse({"detail": "Cross-origin requests are not allowed"}, status_code=403)
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"

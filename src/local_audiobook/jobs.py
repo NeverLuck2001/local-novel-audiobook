@@ -384,7 +384,6 @@ class JobManager:
                                        or not (config.quality.asr_model_path / "config.json").is_file()):
             raise ValueError("Local ASR environment or model is missing")
         records = self.input_files(identifiers) if kind == "convert" else []
-        planned = [self._plan_source(config, item, self._chapter_numbers(selection)) for item in records]
         if kind == "preview" and (not preview_text or len(preview_text.strip()) < 2 or len(preview_text) > 1500):
             raise ValueError("Preview text must contain between 2 and 1500 characters")
         identifier = uuid.uuid4().hex[:16]
@@ -397,7 +396,6 @@ class JobManager:
             path.write_text(preview_text.strip(), encoding="utf-8")
             sources.append({"name": path.name, "path": str(path)})
             selection = None
-            planned = [self._plan_source(config, sources[0], None)]
         else:
             for index, item in enumerate(records, 1):
                 target = inputs / f"{index:03d}-{safe_name(Path(item['name']).stem, 80)}{Path(item['name']).suffix.lower()}"
@@ -405,6 +403,7 @@ class JobManager:
                 sources.append({"id": item["id"], "name": item["name"], "path": str(target)})
         for source in sources:
             source["sha256"] = file_hash(Path(source["path"]))
+        planned = [self._plan_source(config, source, self._chapter_numbers(selection)) for source in sources]
         config.work_root = directory / "runtime"
         config.output.root = self.output_root / identifier
         if config.voice.reference_audio:
@@ -440,7 +439,7 @@ class JobManager:
         # so reopening the interface can reattach without interrupting audio.
         self.stop.set()
         if self.thread:
-            self.thread.join(timeout=3)
+            self.thread.join()
         for handle in self.log_handles.values():
             handle.close()
         self.log_handles.clear()
@@ -456,7 +455,10 @@ class JobManager:
                 return False
             arguments = process.cmdline()
             return str(Path(job["config_path"]).resolve()).casefold() in {str(a).casefold() for a in arguments}
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        except psutil.AccessDenied:
+            # Do not start another GPU conversion while this PID cannot be inspected.
+            return psutil.pid_exists(job["pid"])
+        except (psutil.NoSuchProcess, psutil.ZombieProcess):
             return False
 
     def external_processes(self, fresh=False) -> list[dict]:
@@ -494,9 +496,10 @@ class JobManager:
         return found
 
     def _launch(self, job: dict):
+        attempt_id = uuid.uuid4().hex
         arguments = [sys.executable, "-m", "local_audiobook.jobs", "--run-job", job["id"],
                      "--app-root", str(self.app_root), "--workspace", str(self.workspace),
-                     "--config", job["config_path"]]
+                     "--config", job["config_path"], "--attempt-id", attempt_id]
         environment = os.environ.copy()
         environment["PYTHONPATH"] = str(self.app_root / "src")
         environment["PYTHONUNBUFFERED"] = "1"
@@ -516,7 +519,8 @@ class JobManager:
         except psutil.NoSuchProcess:
             process_created = time.time()
         job.update(status="running", pid=child.pid, process_created=process_created,
-                   started_at=launched_at, attempt=job["attempt"] + 1, blocked_reason=None, error=None)
+                   started_at=launched_at, attempt=job["attempt"] + 1, attempt_id=attempt_id,
+                   blocked_reason=None, error=None)
         self.children[job["id"]] = child
         self.log_handles[job["id"]] = log
         self._save(job)
@@ -678,11 +682,21 @@ class JobManager:
         handle = self.log_handles.pop(job["id"], None)
         if handle:
             handle.close()
+        result = read_json(self.root / "jobs" / job["id"] / "worker-result.json", {})
+        if not job.get("attempt_id") or result.get("attempt_id") != job["attempt_id"]:
+            result = {}
+        if returncode is None:
+            returncode = result.get("returncode")
         batch = read_json(Path(job["work_root"]) / "batch.json", {})
-        books = batch.get("books", [])
+        # A resumed worker can fail before replacing an earlier completed batch.
+        current_batch = bool(batch.get("updated_at")) and batch["updated_at"] >= (job.get("started_at") or "")
+        books = batch.get("books", []) if current_batch else []
+        failed = returncode not in {None, 0} or (bool(job.get("attempt_id")) and returncode is None)
         paused = Path(job["stop_file"]).exists()
         if job.get("cancel_requested_at"):
             status = "cancelled"
+        elif failed:
+            status = "failed"
         elif books and all(book.get("status") == "completed" for book in books):
             status = "completed"
         elif paused:
@@ -690,6 +704,8 @@ class JobManager:
         else:
             status = "failed"
         errors = [book.get("error") for book in books if book.get("error")]
+        if result.get("error"):
+            errors.append(result["error"])
         job.update(status=status, finished_at=now(), returncode=returncode, pid=None,
                    process_created=None, blocked_reason=None, error="; ".join(errors) or
                    ("Conversion failed; inspect the retained log" if status == "failed" else None))
@@ -719,6 +735,8 @@ class JobManager:
                             queued["blocked_reason"] = reason
                             self._save(queued)
                         continue
+                    if self.stop.is_set():
+                        return
                     try:
                         self._launch(queued)
                     except Exception as exc:
@@ -808,7 +826,7 @@ class JobManager:
         if value is None or time.monotonic() - stamp > 2:
             value = state_summary(work)
             self.summary_cache[key] = (time.monotonic(), value)
-        return value
+        return dict(value)
 
     def _media_records(self, job: dict, summaries: list[dict]) -> list[dict]:
         records = []
@@ -993,14 +1011,30 @@ def worker_main() -> int:
     parser.add_argument("--app-root", type=Path, required=True)
     parser.add_argument("--workspace", type=Path, required=True)
     parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--attempt-id")
     args = parser.parse_args()
+    if not re.fullmatch(r"[0-9a-f]{16}", args.run_job):
+        parser.error("The job ID must contain 16 lowercase hexadecimal characters")
+    if args.attempt_id and not re.fullmatch(r"[0-9a-f]{32}", args.attempt_id):
+        parser.error("The attempt ID must contain 32 lowercase hexadecimal characters")
+    error = None
     try:
-        return run_owned_job(args.app_root, args.workspace, args.run_job, args.config)
+        returncode = run_owned_job(args.app_root, args.workspace, args.run_job, args.config)
     except KeyboardInterrupt:
-        return 130
+        returncode = 130
+        error = "Conversion interrupted"
     except Exception as exc:
-        print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
-        return 1
+        error = f"{type(exc).__name__}: {exc}"
+        print(error, file=sys.stderr)
+        returncode = 1
+    directory = args.app_root / "work" / "ui" / "jobs" / args.run_job
+    if args.attempt_id and directory.is_dir():
+        try:
+            atomic_json(directory / "worker-result.json", {"attempt_id": args.attempt_id,
+                        "returncode": returncode, "error": error, "finished_at": now()})
+        except OSError as exc:
+            print(f"WARNING Unable to retain worker result: {exc}", file=sys.stderr)
+    return returncode
 
 
 if __name__ == "__main__":

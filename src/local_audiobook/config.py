@@ -99,9 +99,12 @@ class TextConfig(StrictModel):
 
     @model_validator(mode="after")
     def patterns(self):
-        re.compile(self.chapter_pattern, re.I)
-        for pattern in self.exclude_chapter_patterns + self.remove_line_patterns:
-            re.compile(pattern)
+        try:
+            re.compile(self.chapter_pattern, re.I)
+            for pattern in self.exclude_chapter_patterns + self.remove_line_patterns:
+                re.compile(pattern)
+        except re.error as exc:
+            raise ValueError(f"Invalid text regular expression: {exc}") from exc
         for source, spoken in self.pronunciation_map.items():
             if not source.strip() or not spoken.strip():
                 raise ValueError("Pronunciation replacements require non-empty source and spoken text")

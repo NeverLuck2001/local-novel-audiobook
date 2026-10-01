@@ -21,6 +21,8 @@ Model installation requires a download. Conversion uses local model directories 
 - Official batched inference, SHA256-checked segment caches, retained QC and failure reports.
 - FLAC/WAV/MP3 chapters and complete M4B exports with chapter markers and EPUB cover.
 
+Version 0.2.2 corrects completion reporting after failed restarts, retains per-attempt results across studio restarts, and recovers ASR workers on the next segment retry. Existing jobs and speech caches remain compatible. See the [review handoff](docs/handoff.md) for validation and limits.
+
 The browser studio exposes preset voices and enables its reference-cloning controls when separately downloaded **Base** weights are available. Cloning requires a reference recording and its exact transcript; it has not been audio-validated in this release environment. VoiceDesign is a separate model; installing CustomVoice does not enable it. Automatic character casting and LLM rewriting are not implemented.
 
 ## Installation on Windows

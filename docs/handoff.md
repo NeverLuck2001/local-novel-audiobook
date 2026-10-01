@@ -1,4 +1,18 @@
-# Release handoff: 0.2.1
+# Release handoff: 0.2.2
+
+## Code review update: 2026-10-02
+
+- Reviewed queue ownership, cancellation/requeue, saved results, cache reuse, text/config validation, local HTTP boundaries, ASR lifecycle, and audio delivery. Changes are limited to `jobs.py`, `asr.py`, `config.py`, `web.py`, version metadata, and documentation.
+- Fixed a reproduced false completion: a worker exiting with code 1 could inherit an earlier completed `batch.json`. Each new attempt now retains a matching result receipt, completion requires a current batch, and known failures take precedence. Reopening the studio retains the exit code; missing/mismatched receipts cannot certify completion. Existing workers without an attempt ID remain compatible.
+- ASR startup/protocol/pipe failures now release the worker and handles so the existing segment retry can start a fresh process. Dead workers also restart, with response queues isolated per process. CER rejection alone does not reload ASR.
+- Queue shutdown waits for its scheduler before releasing ownership and checks shutdown again before launch. An inaccessible saved PID conservatively holds the queue. Conversion children remain independent and are not terminated by manager shutdown.
+- Job totals now come from immutable copied inputs, avoiding planning a downloader file before it changes. Summary responses copy the outer cache dictionary so monitoring cannot remove cached manifests. Invalid text regexes become readable validation errors; malformed origins return 403. App shutdown closes the manager even when lifespan exits exceptionally.
+- Verification: all 44 existing checks passed in 35.13 seconds; Python lint, JavaScript syntax, and whitespace checks passed. Isolated local API and real lightweight worker observations covered failed startup with an old completed batch, result recovery after reopening, mismatched receipts, pause/requeue/cancellation with input retention, snapshot totals, retained summary manifests, regex validation (400), invalid origins (403), and allowed origins (200). Controlled ASR protocol processes recovered after an error and after termination; shutdown during a delayed queue scan did not launch a job and released ownership only after the scheduler stopped.
+- The final 0.2.2 wheel matches all 19 package source/static files; the four existing test source files are unchanged. Verification artifacts remain in ignored `work/` and `dist/` directories.
+- Verify with the existing README check commands, then restart the studio and inspect retained jobs. Updating source does not replace an already loaded server module. Logs and result receipts remain under each private job directory. Application version is 0.2.2; dependencies, speech identities, model adapters, and neutral render identities are unchanged.
+- This review did not run new GPU synthesis or an end-to-end ASR model benchmark. Protocol recovery used lightweight local processes. Cooperative cancellation still waits for an inference/encoding boundary; the previously documented clone, Linux/WSL, and endurance limits remain.
+
+No tests were written in this update.
 
 ## Queue controls update: 2026-10-02
 
