@@ -19,6 +19,7 @@ from filelock import FileLock
 import yaml
 
 from .config import Config
+from . import __version__
 from .audio import AudioTools
 from .engine import QwenEngine
 from .pipeline import Pipeline
@@ -28,7 +29,8 @@ from .util import atomic_json, digest, file_hash, now, safe_name
 LOG = logging.getLogger(__name__)
 BOOK_SUFFIXES = {".txt", ".epub"}
 REFERENCE_SUFFIXES = {".wav", ".flac", ".mp3", ".m4a", ".ogg"}
-TERMINAL = {"completed", "failed", "paused"}
+TERMINAL = {"completed", "failed", "paused", "cancelled"}
+ACTIVE = {"running", "pausing", "cancelling"}
 VOICES = [
     {"id": "Serena", "label": "Serena · 温柔女声", "language": "Chinese"},
     {"id": "Vivian", "label": "Vivian · 明亮女声", "language": "Chinese"},
@@ -201,9 +203,10 @@ class JobManager:
         except (OSError, RuntimeError, subprocess.TimeoutExpired):
             pitch_available = False
         return {"voices": VOICES, "defaults": defaults, "models": self.model_descriptors(),
-                "workspace": str(self.workspace), "version": "0.2.0", "local_only": True,
+                "workspace": str(self.workspace), "version": __version__, "local_only": True,
                 "hardware": self.hardware(),
                 "features": {"native_picker": True, "preview": True, "pause": True,
+                             "cancel": True, "queue_ordering": True, "archive": True,
                              "chapter_selection": True, "pitch_adjustment": pitch_available,
                              "voice_clone": any(
                                  m["mode"] == "clone" and m["available"] for m in self.model_descriptors())}}
@@ -421,6 +424,7 @@ class JobManager:
                "planned_chars": sum(b["spoken_chars"] for b in planned),
                "process_created": None, "attempt": 0, "retry_failed": False, "blocked_reason": None}
         with self.lock:
+            self._enqueue(job)
             self.jobs[identifier] = job
             self._save(job)
         return self.detail(identifier)
@@ -677,7 +681,9 @@ class JobManager:
         batch = read_json(Path(job["work_root"]) / "batch.json", {})
         books = batch.get("books", [])
         paused = Path(job["stop_file"]).exists()
-        if books and all(book.get("status") == "completed" for book in books):
+        if job.get("cancel_requested_at"):
+            status = "cancelled"
+        elif books and all(book.get("status") == "completed" for book in books):
             status = "completed"
         elif paused:
             status = "paused"
@@ -685,7 +691,7 @@ class JobManager:
             status = "failed"
         errors = [book.get("error") for book in books if book.get("error")]
         job.update(status=status, finished_at=now(), returncode=returncode, pid=None,
-                   process_created=None, error="; ".join(errors) or
+                   process_created=None, blocked_reason=None, error="; ".join(errors) or
                    ("Conversion failed; inspect the retained log" if status == "failed" else None))
         self._save(job)
 
@@ -695,14 +701,15 @@ class JobManager:
                 try:
                     active = []
                     for job in self.jobs.values():
-                        if job["status"] in {"running", "pausing"}:
+                        if job["status"] in ACTIVE:
                             if self._owned_alive(job):
                                 active.append(job)
                             else:
                                 self._finish(job)
                     if active:
                         continue
-                    queued = next((j for j in self.jobs.values() if j["status"] == "queued"), None)
+                    pending = self._queued_jobs()
+                    queued = pending[0] if pending else None
                     if not queued:
                         continue
                     external = self.external_processes(fresh=True)
@@ -721,14 +728,49 @@ class JobManager:
                 except Exception:
                     LOG.exception("UI queue iteration failed")
 
+    def _queued_jobs(self) -> list[dict]:
+        return sorted((j for j in self.jobs.values() if j["status"] == "queued"),
+                      key=lambda j: (j.get("queue_order", 0), j.get("queued_at", j["created_at"]), j["id"]))
+
+    def _enqueue(self, job: dict, *, first=False):
+        positions = [j.get("queue_order", 0) for j in self._queued_jobs() if j["id"] != job["id"]]
+        order = min(positions, default=0) - 1 if first else max(positions, default=0) + 1
+        job.update(status="queued", queue_order=order, queued_at=now(), archived=False,
+                   blocked_reason=None, started_at=None, finished_at=None, returncode=None)
+
+    def _cancel(self, job: dict):
+        if job["status"] in {"cancelled", "cancelling"}:
+            return
+        if job["status"] == "completed":
+            raise ValueError("Completed jobs cannot be cancelled; archive the record instead")
+        if job["status"] not in ACTIVE | {"queued", "paused", "failed"}:
+            raise ValueError("This job cannot be cancelled")
+        Path(job["stop_file"]).write_text("Cancel at the next safe conversion boundary.\n", encoding="utf-8")
+        job.update(cancel_requested_at=now(), blocked_reason=None)
+        if self._owned_alive(job):
+            job["status"] = "cancelling"
+        else:
+            job.update(status="cancelled", finished_at=now(), pid=None, process_created=None)
+
+    def cancel_queued(self) -> dict:
+        with self.lock:
+            cancelled = []
+            for job in self._queued_jobs():
+                self._cancel(job)
+                self._save(job)
+                cancelled.append(job["id"])
+        return {"cancelled": cancelled, "count": len(cancelled)}
+
     def action(self, identifier: str, action: str) -> dict:
         with self.lock:
             job = self.jobs.get(identifier)
             if not job:
                 raise KeyError(identifier)
+            if job["status"] in ACTIVE and not self._owned_alive(job):
+                self._finish(job)
             if action == "pause":
                 if job["status"] == "queued":
-                    job.update(status="paused", blocked_reason=None)
+                    job.update(status="paused", finished_at=now(), blocked_reason=None)
                 elif job["status"] in {"running", "pausing"}:
                     if not self._owned_alive(job):
                         raise ValueError("The owned conversion has already exited")
@@ -736,11 +778,25 @@ class JobManager:
                     job["status"] = "pausing"
                 elif job["status"] != "paused":
                     raise ValueError("Only queued or running jobs can be paused")
+            elif action == "cancel":
+                self._cancel(job)
             elif action in {"resume", "retry"}:
-                if job["status"] not in {"paused", "failed"}:
-                    raise ValueError("Only paused or failed jobs can be resumed")
+                if job["status"] not in {"paused", "failed", "cancelled"}:
+                    raise ValueError("Only paused, failed or cancelled jobs can be resumed")
                 Path(job["stop_file"]).unlink(missing_ok=True)
-                job.update(status="queued", blocked_reason=None, error=None, retry_failed=action == "retry")
+                retry_failed = action == "retry" or job["status"] in {"failed", "cancelled"}
+                job.update(error=None, retry_failed=retry_failed, cancel_requested_at=None)
+                self._enqueue(job)
+            elif action == "move-first":
+                if job["status"] != "queued":
+                    raise ValueError("Only queued jobs can be moved")
+                self._enqueue(job, first=True)
+            elif action == "archive":
+                if job["status"] not in TERMINAL or self._owned_alive(job):
+                    raise ValueError("Only stopped jobs can be archived")
+                job["archived"] = True
+            elif action == "unarchive":
+                job["archived"] = False
             else:
                 raise ValueError("Unknown job action")
             self._save(job)
@@ -785,6 +841,8 @@ class JobManager:
             if identifier not in self.jobs:
                 raise KeyError(identifier)
             job = dict(self.jobs[identifier])
+            job["queue_position"] = next((i for i, queued in enumerate(self._queued_jobs(), 1)
+                                          if queued["id"] == identifier), None)
         runtime = Path(job["work_root"])
         summaries = [self._summary(path.parent) for path in sorted(runtime.glob("*/plan.json"))]
         planned_total = sum(s["total"] for s in summaries)
@@ -820,7 +878,8 @@ class JobManager:
             percent = 100.0
         else:
             percent = round(completed / total * 100, 1) if total else 0.0
-        active_summary = next((s for s in reversed(summaries) if s["status"] == "running"
+        active_summary = next((s for s in reversed(summaries) if job["status"] in ACTIVE
+                               and s["status"] == "running"
                                and s.get("run_started_at") and job.get("started_at")
                                and s["run_started_at"] >= job["started_at"]), None)
         eta = speed = current_rtf = chars_per_second = None
@@ -853,11 +912,14 @@ class JobManager:
         if active_summary:
             job["phase"] = active_summary.get("phase")
             job["active_batch_size"] = active_summary.get("active_batch_size")
+        if job["status"] in {"cancelling", "cancelled"}:
+            job["phase"] = job["status"]
+            job["eta_seconds"] = None
         return job
 
     def list_jobs(self) -> list[dict]:
         with self.lock:
-            identifiers = list(reversed(self.jobs))
+            identifiers = sorted(self.jobs, key=lambda key: (self.jobs[key]["created_at"], key), reverse=True)
         return [self.detail(identifier) for identifier in identifiers]
 
     def media_path(self, identifier: str, file_id: str) -> Path:

@@ -1,4 +1,15 @@
-# Release handoff: 0.2.0
+# Release handoff: 0.2.1
+
+## Queue controls update: 2026-10-02
+
+- `jobs.py` / `web.py` add durable cooperative cancellation, bulk cancellation of waiting jobs, stable queue order/positions, run-next priority, and reversible record archiving. Cancelled tasks retain inputs, speech and exports; explicit resume requeues them. External conversions remain read-only.
+- The browser adds per-task cancel/requeue/hide/restore actions, queue positions, a bulk-cancel button, and hidden-record visibility. `ui.py` adds API-based `--list-jobs`, `--cancel-job` and `--cancel-queued`; these require the studio server to be running.
+- Existing queue records remain compatible. Application version is 0.2.1; synthesis/cache identities are unchanged. No dependency changes or conversion-process termination is needed to apply this update.
+- Requeuing cancelled/failed jobs retries unfinished failed segments as well as pending work. A requeue clears stale attempt timestamps/exit codes; stopped jobs no longer display a stale active ETA.
+- Verification: the final 44 existing checks passed in 34.24 seconds; Python lint and JavaScript syntax passed. Manual API/controlled-process checks observed `cancelling` to `cancelled`, idempotent cancellation, queue order/position retention, requeue, archive/restore, bulk cancellation, retained inputs, and rejection of unknown external IDs/foreign origins. Browser clicks verified the queue controls; terminal commands verified the live local API. The final wheel matches the shipped Python/static files. Runtime observations stay under ignored `work/`.
+- Cancellation remains cooperative and may wait for the current inference or encoding operation. Hidden records keep their files and can still supply compatible speech to future jobs; archiving does not reclaim disk space.
+
+No tests were written in this update.
 
 ## Changes and affected components
 

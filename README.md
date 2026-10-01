@@ -14,7 +14,8 @@ Model installation requires a download. Conversion uses local model directories 
 - Independent output speed (0.75–1.5×), pitch (±3 semitones), pauses, and loudness controls.
 - Explicit pronunciation replacements: retain source text and check ASR against the spoken text.
 - Opt-in URL, downloader front matter, and user-specified line-pattern removal.
-- One GPU queue with persistent jobs, safe boundary pauses, resume, and failed-segment retries.
+- One GPU queue with durable order/positions, run-next priority, safe pause/cancellation, resume, and failed-segment retries.
+- Cancel all waiting jobs without stopping the active job; hide and restore stopped records without deleting audio.
 - Progress, generated duration, measured generation time, RTF, approximate ETA, and logs.
 - Read-only monitoring of a conversion started outside the studio; queued jobs wait for it.
 - Official batched inference, SHA256-checked segment caches, retained QC and failure reports.
@@ -54,6 +55,18 @@ Open the localhost address printed by the launcher. Select or upload novels, ins
 Presets and generation parameters change the voice/audio cache identity. In preset mode, a new job with matching input and synthesis identity can import completed speech from earlier studio jobs; changing output speed, pitch, loudness, or encoding can then reuse raw speech. Imported audio still receives file/QC validation, while each job retains independent records and outputs. Reference cloning currently reuses cache within a resumed job; cross-job import is limited to presets.
 
 The server binds to loopback only. It has no remote login or Internet deployment mode. Browser controls operate studio-owned jobs; conversions started elsewhere are monitored read-only. Pausing waits for a safe segment/batch boundary and can take time during inference or encoding. Closing the server does not force-kill a conversion; persisted process identity allows reattachment on restart.
+
+**Cancel task** immediately removes waiting/paused jobs from the queue. Running jobs show **Cancelling** until the current operation reaches a safe boundary; cancellation never kills an unrelated process or deletes input, cached speech, or exports. A cancelled job stays stopped across server restarts and can be explicitly requeued, retrying unfinished/failed segments while retaining successful speech. **Run next** changes only waiting order. **Hide record** removes a stopped job from the default view; enable **Show hidden records** to restore it. Completed jobs can be hidden instead of cancelled.
+
+The running studio can also be controlled from a terminal (use `--port` for a non-default port):
+
+```powershell
+python ui.py --list-jobs
+python ui.py --cancel-job <job-id>
+python ui.py --cancel-queued
+```
+
+These commands use the live local API, so they do not edit queue files behind the server's back. Start the studio first. Bulk cancellation affects waiting jobs only.
 
 For a new studio checkout beside a running older checkout, reuse its models and environment without editing its files:
 

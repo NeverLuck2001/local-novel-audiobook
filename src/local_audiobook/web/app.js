@@ -20,6 +20,7 @@ const state = {
   connected: false,
   audioUrl: null,
   saved: null,
+  showArchived: false,
 };
 
 const voiceDescriptions = {
@@ -50,6 +51,8 @@ const statuses = {
   preparing: "正在准备",
   stopping: "正在保存进度",
   pausing: "正在保存进度",
+  cancelling: "正在取消",
+  cancelled: "已取消",
 };
 
 const phases = {
@@ -60,6 +63,8 @@ const phases = {
   checkpoint: "保存进度",
   rendering: "处理节奏与响度",
   exporting: "导出有声书",
+  cancelling: "等待当前处理结束后取消",
+  cancelled: "已取消，音频和进度已保留",
 };
 
 const serviceMessages = {
@@ -71,6 +76,10 @@ const serviceMessages = {
   "Select between 1 and 100 books": "请一次选择 1 至 100 本小说。",
   "The selected TTS model has not been downloaded": "当前合成模型尚未下载完整，请先安装本地模型。",
   "Local ASR environment or model is missing": "本地语音识别环境或模型缺失，请先完成安装，或关闭语音识别核对。",
+  "Completed jobs cannot be cancelled; archive the record instead": "已完成的任务无需取消，可以隐藏记录。音频仍会保留。",
+  "Only queued jobs can be moved": "只有排队中的任务可以调整顺序，当前任务可能已开始。",
+  "Only stopped jobs can be archived": "请先暂停或取消任务，等它停止后再隐藏记录。",
+  "Only paused, failed or cancelled jobs can be resumed": "只有已暂停、失败或已取消的任务可以重新排队。",
 };
 
 function readableMessage(message) {
@@ -143,6 +152,7 @@ async function mutate(message, action, button) {
     state.mutation = false;
     elements.busyOverlay.classList.add("hidden");
     if (button) button.disabled = false;
+    updateQueueControls();
     updateSelection();
   }
 }
@@ -707,7 +717,13 @@ function externalId(job, index = 0) {
 }
 
 function allJobs() {
-  return [...state.jobs.map(job => ({...job, displayId: String(job.id), readonly: false})), ...state.external.map((job, index) => ({...job, displayId: externalId(job, index), readonly: true}))];
+  return [...state.jobs.filter(job => !job.archived || state.showArchived).map(job => ({...job, displayId: String(job.id), readonly: false})), ...state.external.map((job, index) => ({...job, displayId: externalId(job, index), readonly: true}))];
+}
+
+function updateQueueControls() {
+  const waitingCount = state.jobs.filter(job => job.status === "queued").length;
+  elements.cancelQueued.disabled = !waitingCount || state.mutation;
+  elements.cancelQueued.textContent = waitingCount ? `取消全部排队任务（${waitingCount}）` : "取消全部排队任务";
 }
 
 function renderJobs() {
@@ -718,7 +734,8 @@ function renderJobs() {
     state.detail = null;
   }
   elements.jobList.replaceChildren();
-  const queuedCount = state.jobs.filter(job => ["running", "queued", "preparing", "stopping"].includes(job.status)).length;
+  const queuedCount = state.jobs.filter(job => ["running", "queued", "preparing", "pausing", "cancelling", "stopping"].includes(job.status)).length;
+  updateQueueControls();
   elements.queueCount.textContent = queuedCount ? `${queuedCount} 个任务进行中` : jobs.length ? `${jobs.length} 个任务` : "队列为空";
   elements.emptyJobs.classList.toggle("hidden", jobs.length > 0);
   elements.externalNotice.classList.toggle("hidden", !state.queueBlocked && !state.external.some(job => ["running", "preparing"].includes(job.status)));
@@ -727,7 +744,8 @@ function renderJobs() {
     button.type = "button";
     const progress = metrics(job);
     const percentage = progress.percent === null ? "" : ` · ${progress.percent.toFixed(0)}%`;
-    button.append(node("strong", "", jobTitle(job)), node("small", "", `${job.readonly ? "原有任务 · " : ""}${statuses[job.status] || job.status || "状态未知"}${percentage}`));
+    const queueLabel = job.queue_position ? ` · 队列第 ${job.queue_position} 位` : "";
+    button.append(node("strong", "", jobTitle(job)), node("small", "", `${job.readonly ? "原有任务 · " : ""}${statuses[job.status] || job.status || "状态未知"}${percentage}${queueLabel}${job.archived ? " · 已隐藏" : ""}`));
     button.setAttribute("aria-pressed", String(state.activeId === job.displayId));
     button.addEventListener("click", async () => {
       state.activeId = job.displayId;
@@ -785,10 +803,20 @@ function logText(job) {
 function actionButton(label, action, job, className = "secondary") {
   const button = node("button", `button ${className}`, label);
   button.type = "button";
-  button.addEventListener("click", () => mutate(action === "pause" ? "正在请求安全暂停并保存进度" : "正在安排任务续跑", async () => {
+  const messages = {
+    pause: ["正在请求安全暂停并保存进度", "已提交暂停请求，当前处理会安全保存后停止。"],
+    cancel: ["正在取消任务", "任务已取消或正在安全停止。已生成音频和进度会保留，不会自动重启。"],
+    resume: ["正在安排任务续跑", "任务已加入队列，将复用兼容的已完成音频。"],
+    retry: ["正在安排失败部分重试", "未完成部分已加入队列，通过核对的音频会复用。"],
+    "move-first": ["正在调整队列", "该任务将在当前任务结束后优先运行。"],
+    archive: ["正在隐藏任务记录", "记录已隐藏，音频和缓存仍保留。勾选“显示隐藏记录”可以找回。"],
+    unarchive: ["正在恢复任务记录", "记录已恢复显示，任务不会自动启动。"],
+  };
+  const [busy, success] = messages[action];
+  button.addEventListener("click", () => mutate(busy, async () => {
     await api(`/api/jobs/${encodeURIComponent(job.id)}/${action}`, {method: "POST"});
     await refresh(true);
-    showNotice(action === "pause" ? "已提交暂停请求，当前处理会安全保存后停止。" : "任务已加入队列，将复用兼容的已完成音频。", "success");
+    showNotice(success, "success");
   }, button));
   return button;
 }
@@ -804,6 +832,7 @@ function renderJobDetail() {
   if (job.current_chapter || job.chapter_title) subtitle.push(job.current_chapter || job.chapter_title);
   if (job.phase && phases[job.phase]) subtitle.push(phases[job.phase]);
   if (job.active_batch_size) subtitle.push(`当前批次 ${job.active_batch_size} 段`);
+  if (job.queue_position) subtitle.push(`队列第 ${job.queue_position} 位`);
   const reusableSegments = finite(job.cache_reused_segments) || 0;
   if (reusableSegments > 0) subtitle.push(`兼容缓存 ${reusableSegments} 段，核对后复用`);
   const scopes = [...new Set([scopeLabel(job), ...(Array.isArray(job.books) ? job.books.map(scopeLabel) : [])].filter(Boolean))];
@@ -838,6 +867,24 @@ function renderJobDetail() {
     elements.jobActions.append(actionButton("继续生成", "resume", job));
   } else if (job.status === "failed") {
     elements.jobActions.append(actionButton("重试未完成部分", "retry", job));
+  } else if (job.status === "cancelled") {
+    elements.jobActions.append(actionButton("重新排队", "resume", job));
+  }
+  if (!job.readonly) {
+    if (["running", "queued", "preparing", "pausing", "paused", "failed"].includes(job.status)) {
+      elements.jobActions.append(actionButton("取消任务", "cancel", job, "danger"));
+    }
+    if (job.status === "queued" && job.queue_position > 1) {
+      elements.jobActions.append(actionButton("下一个运行", "move-first", job));
+    }
+    if (["paused", "failed", "completed", "cancelled"].includes(job.status)) {
+      elements.jobActions.append(actionButton(job.archived ? "恢复显示" : "隐藏记录", job.archived ? "unarchive" : "archive", job));
+    }
+    if (job.status === "cancelling") {
+      elements.jobActions.append(node("p", "", "取消已提交，等待当前批次或编码安全结束；不会删除音频，也不会自动继续。"));
+    } else if (job.status === "cancelled") {
+      elements.jobActions.append(node("p", "", "已退出队列，原文、已生成音频和进度仍保留。需要时可重新排队。"));
+    }
   }
   renderExports(job.exports);
   const shouldFollow = elements.jobLog.scrollTop + elements.jobLog.clientHeight >= elements.jobLog.scrollHeight - 35;
@@ -902,6 +949,16 @@ async function refresh(force = false) {
 }
 
 function attachEvents() {
+  elements.showArchived.addEventListener("change", () => {
+    state.showArchived = elements.showArchived.checked;
+    renderJobs();
+    refreshActiveDetail();
+  });
+  elements.cancelQueued.addEventListener("click", () => mutate("正在取消排队任务", async () => {
+    const result = await api("/api/queue/cancel", {method: "POST"});
+    await refresh(true);
+    showNotice(`已取消 ${result.count} 个排队任务，当前正在运行的任务不受影响。`, "success");
+  }, elements.cancelQueued));
   elements.dismissNotice.addEventListener("click", () => elements.notice.classList.add("hidden"));
   elements.refreshButton.addEventListener("click", () => refresh(true));
   elements.uploadButton.addEventListener("click", () => elements.fileInput.click());

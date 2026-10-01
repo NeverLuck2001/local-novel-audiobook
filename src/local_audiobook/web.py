@@ -143,6 +143,10 @@ def create_app(app_root: Path | None = None, workspace: Path | None = None) -> F
     def jobs():
         return {"jobs": manager.list_jobs()}
 
+    @app.post("/api/queue/cancel")
+    def cancel_queued():
+        return manager.cancel_queued()
+
     @app.get("/api/jobs/{identifier}")
     def detail(identifier: str):
         return manager.detail(identifier)
