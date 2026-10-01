@@ -1,0 +1,41 @@
+work_root: work
+tts:
+  model_path: models/Qwen3-TTS-12Hz-1.7B-CustomVoice
+  device: cuda:0
+  dtype: bfloat16
+  attention: sdpa
+  batch_size: 4
+  seed: 20261001
+  temperature: 0.8
+  max_new_tokens: 2048
+voice:
+  mode: preset
+  speaker: Serena
+  language: Chinese
+  instruct: 自然、温柔、平静的小说旁白，语速稍慢，避免夸张表演。
+segment:
+  target_chars: 200
+  max_chars: 300
+  min_chars: 60
+text:
+  remove_urls: false
+  strip_front_matter: false
+  remove_line_patterns: []
+  pronunciation_map: {}
+  join_wrapped_lines: false
+  exclude_chapter_patterns: []
+quality:
+  max_retry: 3
+  asr_check: true
+  asr_python: .venv-asr/Scripts/python.exe
+  asr_model_path: models/Qwen3-ASR-0.6B
+  max_cer: 0.15
+output:
+  root: output
+  chapter_formats: [flac]
+  m4b: true
+  mp3: false
+  loudness_lufs: -18
+  bitrate: 128k
+  speech_rate: 1.0
+  pitch_semitones: 0.0
