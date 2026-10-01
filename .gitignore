@@ -1,0 +1,45 @@
+# Local environments and build products
+.venv*/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+.development/
+.idea/
+.vscode/
+
+# Private books, model weights, reference voices, and generated artifacts
+/books/
+/models/
+/voices/
+/downloads/
+/research/
+/work/
+/output/
+*.log
+*.sqlite3*
+*.lock
+*.wav
+*.flac
+*.mp3
+*.m4b
+*.safetensors
+*.pt
+*.pth
+*.zip
+
+# Local configuration, credentials, and machine-specific reports
+.env
+.env.*
+*.pem
+*.key
+config.local.*
+config.*.local.*
+config.private.*
+/docs/*.json
+.DS_Store
+Thumbs.db
