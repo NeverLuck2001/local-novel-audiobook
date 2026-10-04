@@ -21,10 +21,12 @@ import yaml
 from .config import Config
 from . import __version__
 from .audio import AudioTools
+from .asr import ASRWorker
 from .engine import QwenEngine
 from .pipeline import Pipeline
 from .state import State
 from .util import atomic_json, digest, file_hash, now, safe_name
+from .voices import MAX_REFERENCE_CLIPS, prepare_references
 
 LOG = logging.getLogger(__name__)
 BOOK_SUFFIXES = {".txt", ".epub"}
@@ -151,6 +153,8 @@ class JobManager:
         self.output_root.mkdir(parents=True, exist_ok=True)
         self.files_path = self.root / "files.json"
         self.files = read_json(self.files_path, {})
+        self.voices_path = self.root / "voices.json"
+        self.voice_profiles = read_json(self.voices_path, {})
         self.monitor_records_path = self.root / "monitor-records.json"
         self.removed_monitors = read_json(self.monitor_records_path, {})
         self.jobs = {}
@@ -211,6 +215,9 @@ class JobManager:
                 "features": {"native_picker": True, "preview": True, "pause": True,
                              "cancel": True, "queue_ordering": True, "archive": True,
                              "monitor_archive": True,
+                              "reference_preparation": True, "voice_library": True,
+                              "reference_asr": (self.default_config.quality.asr_python.is_file()
+                                                and (self.default_config.quality.asr_model_path / "config.json").is_file()),
                              "chapter_selection": True, "pitch_adjustment": pitch_available,
                              "voice_clone": any(
                                  m["mode"] == "clone" and m["available"] for m in self.model_descriptors())}}
@@ -266,6 +273,87 @@ class JobManager:
     def list_files(self) -> list[dict]:
         with self.lock:
             return [dict(item) for item in self.files.values() if Path(item["path"]).is_file()]
+
+    def reference_file(self, identifier: str) -> dict:
+        with self.lock:
+            item = self.files.get(identifier)
+            if not item or item["kind"] != "reference" or not Path(item["path"]).is_file():
+                raise KeyError(identifier)
+            return dict(item)
+
+    def list_voices(self) -> list[dict]:
+        with self.lock:
+            return [dict(profile) for profile in self.voice_profiles.values()
+                    if not profile.get("archived") and Path(profile["reference"]["path"]).is_file()]
+
+    def save_voice(self, name: str, reference_id: str, text: str) -> dict:
+        name, text = name.strip(), text.strip()
+        if not 1 <= len(name) <= 80 or not 1 <= len(text) <= 12000:
+            raise ValueError("Enter a voice name of 1 to 80 characters and an exact reference transcript")
+        with self.lock:
+            reference = self.reference_file(reference_id)
+            if not reference.get("prepared"):
+                raise ValueError("Prepare the recordings before saving a reusable voice")
+            identifier = uuid.uuid4().hex[:16]
+            directory = self.root / "voices" / identifier
+            directory.mkdir(parents=True)
+            target = directory / "reference.wav"
+            shutil.copyfile(reference["path"], target)
+            saved = self.register_file(target, reference=True)
+            saved.update(prepared=True, duration=reference["duration"], sha256=file_hash(target))
+            atomic_json(self.files_path, self.files)
+            profile = {"id": identifier, "name": name, "reference": dict(saved), "text": text,
+                       "duration": reference["duration"], "created_at": now(), "archived": False}
+            for previous in self.voice_profiles.values():
+                if previous["name"].casefold() == name.casefold() and not previous.get("archived"):
+                    previous["archived"] = True
+            self.voice_profiles[identifier] = profile
+            atomic_json(self.voices_path, self.voice_profiles)
+            return dict(profile)
+
+    def archive_voice(self, identifier: str) -> dict:
+        with self.lock:
+            if identifier not in self.voice_profiles:
+                raise KeyError(identifier)
+            self.voice_profiles[identifier]["archived"] = True
+            atomic_json(self.voices_path, self.voice_profiles)
+            return {"id": identifier, "archived": True}
+
+    def create_reference(self, clips: list[dict]) -> dict:
+        """Use the existing persistent queue to serialize reference ASR with TTS."""
+        if not 1 <= len(clips) <= MAX_REFERENCE_CLIPS:
+            raise ValueError("Select between 1 and 5 recordings of the same speaker")
+        records = [self.reference_file(clip["id"]) for clip in clips]
+        needs_asr = any(not str(clip.get("text") or "").strip() for clip in clips)
+        config = self.default_config.model_copy(deep=True)
+        if needs_asr and (not config.quality.asr_python.is_file()
+                          or not (config.quality.asr_model_path / "config.json").is_file()):
+            raise ValueError("Enter the exact transcript or install the local ASR environment")
+        identifier = uuid.uuid4().hex[:16]
+        directory = self.root / "jobs" / identifier
+        inputs = directory / "inputs"
+        inputs.mkdir(parents=True)
+        snapshots = []
+        for index, (clip, item) in enumerate(zip(clips, records, strict=True), 1):
+            target = inputs / f"reference-{index:02d}{Path(item['path']).suffix.lower()}"
+            shutil.copyfile(item["path"], target)
+            snapshots.append({**clip, "path": str(target), "name": item["name"]})
+        atomic_json(directory / "reference-inputs.json", snapshots)
+        config_path = directory / "config.yaml"
+        config_path.write_text(yaml.safe_dump(config.model_dump(mode="json"), allow_unicode=True,
+                                            sort_keys=False), encoding="utf-8")
+        job = {"id": identifier, "kind": "reference", "title": "Voice reference preparation", "status": "queued",
+               "sources": [], "config_path": str(config_path), "input_root": str(inputs),
+               "work_root": str(directory / "reference"), "output_root": str(self.output_root / identifier),
+               "stop_file": str(directory / "pause.request"), "log_path": str(directory / "conversion.log"),
+               "chapters": None, "created_at": now(), "updated_at": now(), "pid": None,
+               "planned_total": len(clips), "planned_chars": 0, "process_created": None,
+               "attempt": 0, "retry_failed": False, "blocked_reason": None}
+        with self.lock:
+            self._enqueue(job)
+            self.jobs[identifier] = job
+            self._save(job)
+        return self.detail(identifier)
 
     def input_files(self, identifiers: list[str]) -> list[dict]:
         if not identifiers or len(identifiers) > 100:
@@ -697,11 +785,14 @@ class JobManager:
         books = batch.get("books", []) if current_batch else []
         failed = returncode not in {None, 0} or (bool(job.get("attempt_id")) and returncode is None)
         paused = Path(job["stop_file"]).exists()
+        reference = read_json(Path(job["work_root"]) / "reference-result.json", {}) if job.get("kind") == "reference" else {}
+        reference_ready = (reference.get("created_at", "") >= (job.get("started_at") or "")
+                           and Path(reference.get("path", "")).is_file())
         if job.get("cancel_requested_at"):
             status = "cancelled"
         elif failed:
             status = "failed"
-        elif books and all(book.get("status") == "completed" for book in books):
+        elif reference_ready or (books and all(book.get("status") == "completed" for book in books)):
             status = "completed"
         elif paused:
             status = "paused"
@@ -713,6 +804,14 @@ class JobManager:
         job.update(status=status, finished_at=now(), returncode=returncode, pid=None,
                    process_created=None, blocked_reason=None, error="; ".join(errors) or
                    ("Conversion failed; inspect the retained log" if status == "failed" else None))
+        if status == "completed" and reference_ready:
+            item = self.register_file(Path(reference["path"]), reference=True)
+            item.update(prepared=True, duration=reference["duration"], sha256=reference["sha256"])
+            atomic_json(self.files_path, self.files)
+            job["reference"] = dict(item)
+            job["reference_text"] = reference["text"]
+            job["reference_warnings"] = reference["warnings"]
+            job["reference_clips"] = reference["clips"]
         self._save(job)
 
     def _run(self):
@@ -865,6 +964,17 @@ class JobManager:
             job = dict(self.jobs[identifier])
             job["queue_position"] = next((i for i, queued in enumerate(self._queued_jobs(), 1)
                                           if queued["id"] == identifier), None)
+        if job.get("kind") == "reference":
+            progress = read_json(Path(job["work_root"]) / "progress.json", {})
+            current_progress = (job["status"] != "queued" and progress.get("updated_at", "")
+                                >= (job.get("started_at") or job["created_at"]))
+            completed = job["planned_total"] if job["status"] == "completed" else (
+                progress.get("completed", 0) if current_progress else 0)
+            job.update(completed=completed, total=job["planned_total"],
+                       percent=round(100 * completed / job["planned_total"], 1), phase="reference",
+                       audio_seconds=job.get("reference", {}).get("duration", 0),
+                       exports=[], books=[], chapters=[], qc={}, logs=tail(Path(job["log_path"])))
+            return job
         runtime = Path(job["work_root"])
         summaries = [self._summary(path.parent) for path in sorted(runtime.glob("*/plan.json"))]
         planned_total = sum(s["total"] for s in summaries)
@@ -1007,6 +1117,24 @@ def run_owned_job(app_root: Path, workspace: Path, identifier: str, config_path:
     if Path(job["config_path"]).resolve() != config_path.resolve():
         raise ValueError("The worker configuration does not match its saved job")
     if Path(job["stop_file"]).exists():
+        return 0
+    if job.get("kind") == "reference":
+        config = Config.model_validate(yaml.safe_load(config_path.read_text(encoding="utf-8")))
+        clips = read_json(manager.root / "jobs" / identifier / "reference-inputs.json", [])
+        directory = Path(job["work_root"])
+        directory.mkdir(parents=True, exist_ok=True)
+        atomic_json(directory / "progress.json", {"completed": 0, "total": len(clips), "updated_at": now()})
+        worker = ASRWorker(config.quality, directory / "recognition.log") if any(
+            not clip.get("text", "").strip() for clip in clips) else None
+        try:
+            prepare_references(AudioTools(config), clips, directory,
+                               transcribe=worker.transcribe if worker else None,
+                               stopped=lambda: Path(job["stop_file"]).exists(),
+                               progress=lambda done, total: atomic_json(directory / "progress.json",
+                                   {"completed": done, "total": total, "updated_at": now()}))
+        finally:
+            if worker:
+                worker.close()
         return 0
     try:
         report = manager.prepare_cache(job)

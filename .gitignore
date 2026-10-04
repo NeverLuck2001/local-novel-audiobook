@@ -26,6 +26,8 @@ dist/
 *.wav
 *.flac
 *.mp3
+*.m4a
+*.ogg
 *.m4b
 *.safetensors
 *.pt

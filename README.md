@@ -11,6 +11,8 @@ Model installation requires a download. Conversion uses local model directories 
 - TXT encoding detection and EPUB spine order, metadata, and cover extraction.
 - Browser file selection and upload, chapter preview and selection, visible cleanup audit.
 - Nine official CustomVoice presets, free-form delivery instructions, short voice previews.
+- Base voice cloning from 1–5 recordings, optional local Chinese transcription, reference playback, and a reusable local voice library.
+- Light/dark/system themes, remembered in the browser without changing generation settings.
 - Independent output speed (0.75–1.5×), pitch (±3 semitones), pauses, and loudness controls.
 - Explicit pronunciation replacements: retain source text and check ASR against the spoken text.
 - Opt-in URL, downloader front matter, and user-specified line-pattern removal.
@@ -25,7 +27,25 @@ Version 0.2.3 adds a **Mature narrator / slightly faster** shortcut and makes it
 
 Stopped studio and legacy CLI records have **Delete record / Restore record** controls. Removal keeps original books, cached speech, outputs and logs. Enable **Show deleted records** to restore them. A running external conversion prevents removal of its display record. An already loaded older studio server can use browser-local recoverable records, which sync to the new API after restart. See the [handoff](docs/handoff.md) for validation and limits.
 
-The browser studio exposes preset voices and enables its reference-cloning controls when separately downloaded **Base** weights are available. Cloning requires a reference recording and its exact transcript; it has not been audio-validated in this release environment. VoiceDesign is a separate model; installing CustomVoice does not enable it. Automatic character casting and LLM rewriting are not implemented.
+Version 0.3.0 adds a complete local reference preparation and voice library workflow plus dark mode. Cloning uses separately downloaded **Qwen3-TTS-12Hz-1.7B-Base** weights and an exact reference transcript. VoiceDesign is a separate model; installing CustomVoice does not enable it. Automatic character casting and LLM rewriting are not implemented.
+
+## Voice cloning and themes
+
+Install the official Base model once, then restart the studio backend to enable the new reference endpoints:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/download_models.py clone --provider modelscope
+python ui.py
+```
+
+1. Select **Voice cloning** and add 1–5 recordings of the same speaker (WAV, MP3, FLAC, M4A or OGG). Start with a clean 5–15 second sample; more recordings do not automatically improve similarity. Avoid music, overlapping speakers and strong room echo. Each source is limited to 64 MB and 10 minutes; selected reference audio, including joining pauses, is limited to 60 seconds.
+2. Optionally select start/end times in seconds. An empty end means the end of the file. Enter exactly what was spoken in each selected range, or leave it empty for local **Chinese** recognition. Supply transcripts manually for other languages. Choose whole words and sentences when trimming.
+3. Click **Prepare recordings and recognize text**. This is a persistent queue job, serialized with audiobook generation, with pause/cancel/resume controls. Preparation converts to 24 kHz mono WAV, trims only edge silence, adjusts gain conservatively and joins clips in order. It retains original recordings and reports quiet, clipping, silence and length warnings; it does not detect speaker identity, remove music or guarantee noise reduction.
+4. Play the prepared reference and correct its combined transcript, especially names and numbers. Save a named voice to reuse it later, then generate a short preview of **new** text before a full book. Saved voices contain local audio and text; no fine-tuning or cloud upload occurs. Removing a voice from the library keeps recordings and existing jobs.
+
+Base uses the recording's voice and delivery rather than CustomVoice instructions. Output speed/pitch still apply; use 1.0x and zero pitch when evaluating similarity. The official model's transcript-free speaker-embedding mode is deliberately not exposed because its quality may be lower. Multiple same-speaker clips become one ordered reference; they are not separate training examples. Official prompt features are computed once and reused across batches within a conversion. See the [official clone API](https://github.com/QwenLM/Qwen3-TTS#voice-clone).
+
+Use the **Theme** selector in the header for light, dark or system appearance. The browser remembers the choice and follows operating-system changes in system mode. Reference uploads, voice profiles, generated audio and downloaded weights stay excluded from Git. An already running older backend needs a restart for reference preparation/library APIs; loading new static files alone is insufficient. Existing conversion children and immutable job snapshots are retained.
 
 ## Installation on Windows
 
