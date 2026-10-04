@@ -151,6 +151,8 @@ class JobManager:
         self.output_root.mkdir(parents=True, exist_ok=True)
         self.files_path = self.root / "files.json"
         self.files = read_json(self.files_path, {})
+        self.monitor_records_path = self.root / "monitor-records.json"
+        self.removed_monitors = read_json(self.monitor_records_path, {})
         self.jobs = {}
         self.lock = threading.RLock()
         self.stop = threading.Event()
@@ -202,11 +204,13 @@ class JobManager:
             pitch_available = self.audio.supports_rubberband()
         except (OSError, RuntimeError, subprocess.TimeoutExpired):
             pitch_available = False
-        return {"voices": VOICES, "defaults": defaults, "models": self.model_descriptors(),
+        return {"voices": VOICES, "defaults": defaults, "default_voice_revision": "mature-v1",
+                "models": self.model_descriptors(),
                 "workspace": str(self.workspace), "version": __version__, "local_only": True,
                 "hardware": self.hardware(),
                 "features": {"native_picker": True, "preview": True, "pause": True,
                              "cancel": True, "queue_ordering": True, "archive": True,
+                             "monitor_archive": True,
                              "chapter_selection": True, "pitch_adjustment": pitch_available,
                              "voice_clone": any(
                                  m["mode"] == "clone" and m["available"] for m in self.model_descriptors())}}
@@ -951,20 +955,47 @@ class JobManager:
             raise KeyError(file_id)
         return Path(match["path"])
 
-    def monitor(self) -> dict:
+    def _legacy_paths(self) -> list[Path]:
+        legacy = self.workspace / "work"
+        return sorted((path for path in legacy.glob("*/progress.json")
+                       if inside(path, legacy) and not inside(path, self.root)),
+                      key=lambda path: path.stat().st_mtime, reverse=True)
+
+    def monitor_action(self, identifier: str, action: str) -> dict:
+        """Remove or restore display records; never edit an external conversion."""
+        if action not in {"archive", "unarchive"}:
+            raise ValueError("Unknown monitor record action")
+        with self.lock:
+            if not any("legacy-" + path.parent.name == identifier for path in self._legacy_paths()):
+                raise KeyError(identifier)
+            if action == "archive":
+                if self.external_processes(fresh=True):
+                    raise ValueError("Stop the external conversion before removing its display record")
+                self.removed_monitors[identifier] = now()
+            else:
+                self.removed_monitors.pop(identifier, None)
+            atomic_json(self.monitor_records_path, self.removed_monitors)
+            return {"id": identifier, "archived": identifier in self.removed_monitors, "read_only": True}
+
+    def monitor(self, include_removed: bool = False) -> dict:
         tasks = []
         legacy = self.workspace / "work"
-        paths = sorted(legacy.glob("*/progress.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-        for path in paths[:20]:
-            if inside(path, self.root):
+        processes = self.external_processes()
+        with self.lock:
+            removed = set(self.removed_monitors)
+        for path in self._legacy_paths():
+            identifier = "legacy-" + path.parent.name
+            archived = identifier in removed
+            if archived and not include_removed:
                 continue
             summary = self._summary(path.parent)
             summary.pop("manifest", None)
-            summary.update(id="legacy-" + path.parent.name, read_only=True,
+            summary.update(id=identifier, read_only=True, archived=archived, can_remove=not processes,
                            logs=tail(legacy / "pipeline.log", 12))
             tasks.append(summary)
-        return {"tasks": tasks, "external_processes": self.external_processes(),
-                "queue_blocked": bool(self.external_processes())}
+            if len(tasks) == 20:
+                break
+        return {"tasks": tasks, "external_processes": processes, "queue_blocked": bool(processes)}
 
 
 def run_owned_job(app_root: Path, workspace: Path, identifier: str, config_path: Path) -> int:

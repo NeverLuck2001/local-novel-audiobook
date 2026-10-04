@@ -1,4 +1,15 @@
-# Release handoff: 0.2.2
+# Release handoff: 0.2.3
+
+## Voice defaults and record removal: 2026-10-04
+
+- `config.yaml` changes new release jobs to Vivian, a mature/confident narration instruction, output rate 1.15 and pitch -1 semitone. Core schema defaults and generation algorithms are unchanged. The original workspace configuration and existing job snapshots remain untouched; changing speaker/instruction requires new speech, while rate/pitch remain output processing.
+- The browser adds a combined mature narrator shortcut, migrates voice defaults once without replacing other saved controls, keeps later manual edits, and fixes shortcut wrapping. Versioned asset URLs avoid retaining older browser scripts/styles. Default batch size remains the previously validated 4; the interface recommends starting at 8 on 32GB and trying 16 on a short chapter. No actual 8/16 long-batch benchmark is claimed.
+- `jobs.py` / `web.py` persist removed legacy display records separately from conversion state, allow restore, reject unknown IDs/actions, and conservatively prevent removal while an external converter runs. Studio records reuse existing recoverable archiving. The browser labels these controls Delete/Restore and offers a combined recovery list.
+- Older loaded servers can serve the updated static UI without interrupting conversion. The browser keeps local remove/restore intents, checks for an external conversion before removal, and synchronizes intents after a newer backend starts. This also makes the voice preset/default available before server restart. The three stale workspace legacy records were removed from display and retained as recoverable metadata; no book, audio or progress files were deleted.
+- Verification: all 44 existing checks passed in 55.90 seconds; no existing test sources changed. Python lint, JavaScript syntax and whitespace checks passed. Isolated API observations covered default values, record removal/restore, persistence across manager recreation, retained progress files, unknown IDs (404), invalid actions (400), and refusal while a lightweight external process remained alive (400). Browser actions verified current-server compatibility, all three removals, refresh persistence, recovery and removal again, and combined preset switching. The seven protected original configuration/progress/job snapshot files retain their hashes.
+- Verify by reloading the studio, selecting the mature shortcut, and inspecting rate/pitch. Enable Show deleted records, restore a stopped record, then remove it again. Use a short voice preview before converting a full book. No new GPU synthesis or perceptual quality validation was run for this preset; its mature character remains an approximation of the selected official voice. Output pitch needs FFmpeg `rubberband`, or use zero pitch. Cancellation still waits for a safe inference/encoding boundary.
+
+No tests were written in this update.
 
 ## Code review update: 2026-10-02
 

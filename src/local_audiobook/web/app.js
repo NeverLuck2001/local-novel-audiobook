@@ -1,6 +1,7 @@
 "use strict";
 
 const STORAGE_KEY = "local-audiobook-studio-v1";
+const DEFAULT_VOICE_REVISION = "mature-v1";
 const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map(element => [element.id, element]));
 const state = {
   info: null,
@@ -21,6 +22,7 @@ const state = {
   audioUrl: null,
   saved: null,
   showArchived: false,
+  monitorOverrides: {},
 };
 
 const voiceDescriptions = {
@@ -36,6 +38,7 @@ const voiceDescriptions = {
 };
 
 const styleInstructions = {
+  mature: "成熟、自信、有气场的成年女性小说旁白，声音略低沉、清晰有力，情绪克制，节奏利落，停顿适度，保持自然叙述。",
   gentle: "自然、温柔、平静的小说旁白，语速稍慢，避免夸张表演。",
   story: "声音沉稳，叙述清晰，节奏从容，适度停顿，保持长篇小说旁白的自然感。",
   dialogue: "自然讲述小说，旁白平静，对白根据上下文表达适度情绪，保持同一朗读者的声线，不要夸张表演。",
@@ -79,6 +82,7 @@ const serviceMessages = {
   "Completed jobs cannot be cancelled; archive the record instead": "已完成的任务无需取消，可以隐藏记录。音频仍会保留。",
   "Only queued jobs can be moved": "只有排队中的任务可以调整顺序，当前任务可能已开始。",
   "Only stopped jobs can be archived": "请先暂停或取消任务，等它停止后再隐藏记录。",
+  "Stop the external conversion before removing its display record": "原窗口的转换仍在运行。请等它停止后再删除显示记录。",
   "Only paused, failed or cancelled jobs can be resumed": "只有已暂停、失败或已取消的任务可以重新排队。",
 };
 
@@ -260,7 +264,9 @@ function collectSettings(requireReference = true) {
 function persistSettings() {
   try {
     const settings = collectSettings(false);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({settings, selected: [...state.selected], reference: state.reference}));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({settings, selected: [...state.selected], reference: state.reference,
+      defaultVoiceRevision: state.info?.default_voice_revision || DEFAULT_VOICE_REVISION,
+      monitorOverrides: state.monitorOverrides}));
   } catch (_) {
     // Invalid intermediate values remain editable without replacing the last valid profile.
   }
@@ -273,6 +279,7 @@ function loadSavedSettings() {
       state.saved = saved;
       state.selected = new Set(Array.isArray(saved.selected) ? saved.selected.map(String) : []);
       state.reference = saved.reference && typeof saved.reference === "object" ? saved.reference : null;
+      state.monitorOverrides = saved.monitorOverrides && typeof saved.monitorOverrides === "object" ? saved.monitorOverrides : {};
     }
   } catch (_) {
     state.saved = null;
@@ -319,6 +326,16 @@ function applySettings(settings) {
   elements.chapters.value = typeof settings.chapters === "string" ? settings.chapters : "";
   setMode(getValue(settings, "voice.mode", "preset"), getValue(settings, "tts.model_path", ""));
   elements.referenceName.textContent = state.reference ? state.reference.name : "选择参考音频";
+  updateRangeLabels();
+  updateVoiceDescription();
+}
+
+function applyMaturePreset() {
+  setMode("preset");
+  elements.speaker.value = "Vivian";
+  elements.instruct.value = styleInstructions.mature;
+  elements.speechRate.value = "1.15";
+  elements.pitch.value = state.info?.features?.pitch_adjustment === false ? "0" : "-1";
   updateRangeLabels();
   updateVoiceDescription();
 }
@@ -395,11 +412,23 @@ function renderInfo(info) {
   elements.hardwareDetail.textContent = [deviceMemory ? `${Number(deviceMemory).toFixed(1)} GB 显存` : null, modelName, info.defaults?.tts?.attention?.toUpperCase()].filter(Boolean).join(" · ") || "使用本地模型与项目配置";
   if (info.version) elements.versionLabel.textContent = `LOCAL AUDIOBOOK STUDIO · ${info.version}`;
   const settings = mergeConfig(info.defaults || {}, state.saved?.settings || {});
+  const voiceRevision = info.default_voice_revision || DEFAULT_VOICE_REVISION;
+  if (state.saved?.defaultVoiceRevision !== voiceRevision) {
+    settings.voice = mergeConfig(settings.voice || {}, info.default_voice_revision ? info.defaults.voice : {
+      mode: "preset", speaker: "Vivian", language: "Chinese", instruct: styleInstructions.mature,
+      reference_audio: null, reference_text: null,
+    });
+    settings.output = mergeConfig(settings.output || {}, {
+      speech_rate: info.default_voice_revision ? info.defaults.output.speech_rate : 1.15,
+      pitch_semitones: info.default_voice_revision ? info.defaults.output.pitch_semitones : -1,
+    });
+  }
   applySettings(settings);
   if (info.features?.pitch_adjustment === false) {
     elements.pitch.value = "0";
     updateRangeLabels();
   }
+  persistSettings();
 }
 
 function fileSize(bytes) {
@@ -717,7 +746,7 @@ function externalId(job, index = 0) {
 }
 
 function allJobs() {
-  return [...state.jobs.filter(job => !job.archived || state.showArchived).map(job => ({...job, displayId: String(job.id), readonly: false})), ...state.external.map((job, index) => ({...job, displayId: externalId(job, index), readonly: true}))];
+  return [...state.jobs.filter(job => !job.archived || state.showArchived).map(job => ({...job, displayId: String(job.id), readonly: false})), ...state.external.filter(job => !job.archived || state.showArchived).map((job, index) => ({...job, displayId: externalId(job, index), readonly: true}))];
 }
 
 function updateQueueControls() {
@@ -745,7 +774,7 @@ function renderJobs() {
     const progress = metrics(job);
     const percentage = progress.percent === null ? "" : ` · ${progress.percent.toFixed(0)}%`;
     const queueLabel = job.queue_position ? ` · 队列第 ${job.queue_position} 位` : "";
-    button.append(node("strong", "", jobTitle(job)), node("small", "", `${job.readonly ? "原有任务 · " : ""}${statuses[job.status] || job.status || "状态未知"}${percentage}${queueLabel}${job.archived ? " · 已隐藏" : ""}`));
+    button.append(node("strong", "", jobTitle(job)), node("small", "", `${job.readonly ? "原有任务 · " : ""}${statuses[job.status] || job.status || "状态未知"}${percentage}${queueLabel}${job.archived ? " · 已删除记录" : ""}`));
     button.setAttribute("aria-pressed", String(state.activeId === job.displayId));
     button.addEventListener("click", async () => {
       state.activeId = job.displayId;
@@ -809,12 +838,28 @@ function actionButton(label, action, job, className = "secondary") {
     resume: ["正在安排任务续跑", "任务已加入队列，将复用兼容的已完成音频。"],
     retry: ["正在安排失败部分重试", "未完成部分已加入队列，通过核对的音频会复用。"],
     "move-first": ["正在调整队列", "该任务将在当前任务结束后优先运行。"],
-    archive: ["正在隐藏任务记录", "记录已隐藏，音频和缓存仍保留。勾选“显示隐藏记录”可以找回。"],
+    archive: ["正在删除显示记录", "记录已移入回收列表，原文、音频和缓存保留。勾选“显示已删除记录”可以恢复。"],
     unarchive: ["正在恢复任务记录", "记录已恢复显示，任务不会自动启动。"],
   };
   const [busy, success] = messages[action];
   button.addEventListener("click", () => mutate(busy, async () => {
-    await api(`/api/jobs/${encodeURIComponent(job.id)}/${action}`, {method: "POST"});
+    if (job.readonly && !state.info?.features?.monitor_archive) {
+      const monitor = await api("/api/monitor");
+      if (action === "archive" && monitor.queue_blocked) {
+        throw new Error(readableMessage("Stop the external conversion before removing its display record"));
+      }
+      // Older running servers cannot load new routes until restarted. Keep
+      // recoverable display changes locally, then sync them to the new API.
+      state.monitorOverrides[job.id] = action === "archive";
+      persistSettings();
+    } else {
+      const group = job.readonly ? "monitor" : "jobs";
+      await api(`/api/${group}/${encodeURIComponent(job.id)}/${action}`, {method: "POST"});
+      if (job.readonly) {
+        delete state.monitorOverrides[job.id];
+        persistSettings();
+      }
+    }
     await refresh(true);
     showNotice(success, "success");
   }, button));
@@ -859,7 +904,12 @@ function renderJobDetail() {
   elements.jobError.textContent = typeof error === "object" ? JSON.stringify(error) : readableMessage(error || "");
   elements.jobActions.replaceChildren();
   if (job.readonly) {
-    elements.jobActions.append(node("p", "", "继续使用原来的窗口管理这次执行。界面不会暂停或修改这个任务。"));
+    if (job.archived || (job.can_remove ?? !state.queueBlocked)) {
+      elements.jobActions.append(actionButton(job.archived ? "恢复记录" : "删除记录", job.archived ? "unarchive" : "archive", job));
+      elements.jobActions.append(node("p", "", "历史记录可以删除或恢复；原文、音频和缓存保留。删除记录不会启动转换。"));
+    } else {
+      elements.jobActions.append(node("p", "", "原窗口的转换正在运行，这里仅显示进度。停止后可删除显示记录。"));
+    }
   } else if (["running", "queued", "preparing"].includes(job.status)) {
     elements.jobActions.append(actionButton(job.status === "queued" ? "暂停排队" : "安全暂停", "pause", job));
     elements.jobActions.append(node("p", "", "暂停请求会保留已完成音频。关闭页面或界面服务，已启动的生成仍会继续。"));
@@ -878,7 +928,7 @@ function renderJobDetail() {
       elements.jobActions.append(actionButton("下一个运行", "move-first", job));
     }
     if (["paused", "failed", "completed", "cancelled"].includes(job.status)) {
-      elements.jobActions.append(actionButton(job.archived ? "恢复显示" : "隐藏记录", job.archived ? "unarchive" : "archive", job));
+      elements.jobActions.append(actionButton(job.archived ? "恢复记录" : "删除记录", job.archived ? "unarchive" : "archive", job));
     }
     if (job.status === "cancelling") {
       elements.jobActions.append(node("p", "", "取消已提交，等待当前批次或编码安全结束；不会删除音频，也不会自动继续。"));
@@ -916,7 +966,18 @@ async function refresh(force = false) {
   if (state.refreshing || (!force && document.hidden)) return;
   state.refreshing = true;
   try {
-    const responses = await Promise.allSettled([api("/api/jobs"), api("/api/monitor")]);
+    if (state.info?.features?.monitor_archive) {
+      for (const [identifier, removed] of Object.entries(state.monitorOverrides)) {
+        try {
+          await api(`/api/monitor/${encodeURIComponent(identifier)}/${removed ? "archive" : "unarchive"}`, {method: "POST"});
+          delete state.monitorOverrides[identifier];
+          persistSettings();
+        } catch (_) {
+          // Keep the local intent if a running external conversion defers removal.
+        }
+      }
+    }
+    const responses = await Promise.allSettled([api("/api/jobs"), api(`/api/monitor?include_removed=${state.showArchived}`)]);
     if (responses[0].status === "fulfilled") {
       state.jobs = responses[0].value.jobs || [];
       const active = state.jobs.find(job => String(job.id) === state.activeId);
@@ -926,7 +987,9 @@ async function refresh(force = false) {
       setConnected(false);
     }
     if (responses[1].status === "fulfilled") {
-      state.external = responses[1].value.tasks || responses[1].value.jobs || [];
+      state.external = (responses[1].value.tasks || responses[1].value.jobs || []).map(job => ({
+        ...job, archived: state.monitorOverrides[job.id] ?? job.archived,
+      }));
       state.queueBlocked = Boolean(responses[1].value.queue_blocked);
     }
     if (state.connected && !state.info) {
@@ -951,7 +1014,7 @@ async function refresh(force = false) {
 function attachEvents() {
   elements.showArchived.addEventListener("change", () => {
     state.showArchived = elements.showArchived.checked;
-    renderJobs();
+    refresh(true);
     refreshActiveDetail();
   });
   elements.cancelQueued.addEventListener("click", () => mutate("正在取消排队任务", async () => {
@@ -999,7 +1062,11 @@ function attachEvents() {
     persistSettings();
   });
   document.querySelectorAll("[data-style]").forEach(button => button.addEventListener("click", () => {
-    elements.instruct.value = styleInstructions[button.dataset.style];
+    if (button.dataset.style === "mature") {
+      applyMaturePreset();
+    } else {
+      elements.instruct.value = styleInstructions[button.dataset.style];
+    }
     persistSettings();
   }));
   const planInputs = new Set(["removeUrls", "stripFrontMatter", "joinLines", "removePatterns", "pronunciation", "chapters", "targetChars", "maxChars", "minChars"]);
@@ -1017,6 +1084,7 @@ function attachEvents() {
     state.saved = null;
     state.reference = null;
     applySettings(state.info.defaults || {});
+    if (!state.info.default_voice_revision) applyMaturePreset();
     invalidatePlan();
     persistSettings();
     showNotice("已恢复项目默认设置。现有任务保留自己的设置快照。", "success");

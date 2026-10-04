@@ -21,7 +21,9 @@ Model installation requires a download. Conversion uses local model directories 
 - Official batched inference, SHA256-checked segment caches, retained QC and failure reports.
 - FLAC/WAV/MP3 chapters and complete M4B exports with chapter markers and EPUB cover.
 
-Version 0.2.2 corrects completion reporting after failed restarts, retains per-attempt results across studio restarts, and recovers ASR workers on the next segment retry. Existing jobs and speech caches remain compatible. See the [review handoff](docs/handoff.md) for validation and limits.
+Version 0.2.3 adds a **Mature narrator / slightly faster** shortcut and makes it the default for new studio jobs: Vivian, a composed/confident delivery instruction, 1.15x output rate, and -1 semitone. The first browser migration applies only these voice/output defaults; other saved controls remain intact. Existing jobs keep their snapshots. CustomVoice style control is an approximation, not an arbitrary new voice design; listen to a short preview before a long book. Disable pitch adjustment if FFmpeg lacks `rubberband`.
+
+Stopped studio and legacy CLI records have **Delete record / Restore record** controls. Removal keeps original books, cached speech, outputs and logs. Enable **Show deleted records** to restore them. A running external conversion prevents removal of its display record. An already loaded older studio server can use browser-local recoverable records, which sync to the new API after restart. See the [handoff](docs/handoff.md) for validation and limits.
 
 The browser studio exposes preset voices and enables its reference-cloning controls when separately downloaded **Base** weights are available. Cloning requires a reference recording and its exact transcript; it has not been audio-validated in this release environment. VoiceDesign is a separate model; installing CustomVoice does not enable it. Automatic character casting and LLM rewriting are not implemented.
 

@@ -10,9 +10,9 @@ tts:
   max_new_tokens: 2048
 voice:
   mode: preset
-  speaker: Serena
+  speaker: Vivian
   language: Chinese
-  instruct: 自然、温柔、平静的小说旁白，语速稍慢，避免夸张表演。
+  instruct: 成熟、自信、有气场的成年女性小说旁白，声音略低沉、清晰有力，情绪克制，节奏利落，停顿适度，保持自然叙述。
 segment:
   target_chars: 200
   max_chars: 300
@@ -37,5 +37,5 @@ output:
   mp3: false
   loudness_lufs: -18
   bitrate: 128k
-  speech_rate: 1.0
-  pitch_semitones: 0.0
+  speech_rate: 1.15
+  pitch_semitones: -1.0

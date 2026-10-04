@@ -164,8 +164,12 @@ def create_app(app_root: Path | None = None, workspace: Path | None = None) -> F
         return manager.action(identifier, action)
 
     @app.get("/api/monitor")
-    def monitor():
-        return manager.monitor()
+    def monitor(include_removed: bool = False):
+        return manager.monitor(include_removed)
+
+    @app.post("/api/monitor/{identifier}/{action}")
+    def monitor_action(identifier: str, action: str):
+        return manager.monitor_action(identifier, action)
 
     @app.get("/api/media/{identifier}/{file_id}")
     def media(identifier: str, file_id: str):
