@@ -6,6 +6,8 @@ The project is a small Python orchestration layer around official Qwen inference
 
 `parser.py` and `text.py` extract EPUB spine order or TXT chapters, perform opt-in cleanup, and split at Chinese punctuation/paragraph boundaries. Literal pronunciation mappings retain the original text and add spoken text. `engine.py` adapts the official CustomVoice/Base interfaces. `generation.py` stages bounded batches. `pipeline.py` coordinates QC, resumability, and exports. `jobs.py` keeps the UI queue, job snapshots, process identities, and read-only monitoring. `web.py` exposes loopback HTTP endpoints.
 
+`voices.py` prepares bounded local references without importing the TTS model. Reference preparation is another owned queue job, with immutable input copies, per-attempt worker receipts and the existing cancellation boundary. It performs FFmpeg conversion, conservative gain/edge trimming, optional isolated Chinese ASR, and ordered same-speaker concatenation. The parent registers the final WAV only after a matching successful worker receipt. Voice profiles retain their own audio copy and corrected transcript under ignored `work/ui/voices`; the library registry is written atomically under the manager lock. Media lookup requires a registered reference ID. In-flight conversions retain their original reference snapshot. Theme state is independent browser-local appearance data.
+
 ## Data flow
 
 1. Select/upload a book and preview chapters, cleanup, and segment counts without loading a model.

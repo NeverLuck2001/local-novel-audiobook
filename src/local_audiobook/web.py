@@ -16,6 +16,7 @@ from .jobs import BOOK_SUFFIXES, JobManager, REFERENCE_SUFFIXES
 from .util import safe_name
 
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024
+MAX_REFERENCE_UPLOAD_BYTES = 64 * 1024 * 1024
 PICKER_LOCK = threading.Lock()
 
 
@@ -27,6 +28,23 @@ class Selection(BaseModel):
 class JobRequest(Selection):
     kind: str = "convert"
     preview_text: str | None = None
+
+
+class ReferenceClip(BaseModel):
+    id: str = Field(min_length=1, max_length=64)
+    start: float = Field(default=0, ge=0, le=600, allow_inf_nan=False)
+    end: float | None = Field(default=None, gt=0, le=600, allow_inf_nan=False)
+    text: str = Field(default="", max_length=3000)
+
+
+class ReferenceRequest(BaseModel):
+    clips: list[ReferenceClip] = Field(min_length=1, max_length=5)
+
+
+class VoiceRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    reference_id: str = Field(min_length=1, max_length=64)
+    text: str = Field(min_length=1, max_length=12000)
 
 
 def create_app(app_root: Path | None = None, workspace: Path | None = None) -> FastAPI:
@@ -97,8 +115,10 @@ def create_app(app_root: Path | None = None, workspace: Path | None = None) -> F
             with target.open("wb") as stream:
                 while block := await file.read(1024 * 1024):
                     total += len(block)
-                    if total > MAX_UPLOAD_BYTES:
-                        raise ValueError("An uploaded file exceeds the 512 MB limit")
+                    limit = MAX_REFERENCE_UPLOAD_BYTES if reference else MAX_UPLOAD_BYTES
+                    if total > limit:
+                        raise ValueError("A reference recording exceeds the 64 MB limit" if reference else
+                                         "An uploaded file exceeds the 512 MB limit")
                     stream.write(block)
             return manager.register_upload(target, Path(file.filename).name, reference=reference)
         except Exception:
@@ -116,6 +136,27 @@ def create_app(app_root: Path | None = None, workspace: Path | None = None) -> F
     @app.post("/api/files/reference")
     async def reference(file: Annotated[UploadFile, File()]):
         return await save_upload(file, reference=True)
+
+    @app.post("/api/references/prepare")
+    def prepare_reference(selection: ReferenceRequest):
+        return manager.create_reference([clip.model_dump() for clip in selection.clips])
+
+    @app.get("/api/references/{identifier}/audio")
+    def reference_audio(identifier: str):
+        item = manager.reference_file(identifier)
+        return FileResponse(item["path"], filename=item["name"])
+
+    @app.get("/api/voices")
+    def voices():
+        return {"voices": manager.list_voices()}
+
+    @app.post("/api/voices")
+    def save_voice(selection: VoiceRequest):
+        return manager.save_voice(selection.name, selection.reference_id, selection.text)
+
+    @app.post("/api/voices/{identifier}/archive")
+    def archive_voice(identifier: str):
+        return manager.archive_voice(identifier)
 
     @app.post("/api/files/pick")
     def pick():

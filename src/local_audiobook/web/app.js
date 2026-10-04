@@ -16,6 +16,10 @@ const state = {
   planSignature: null,
   mode: "preset",
   reference: null,
+  referenceClips: [],
+  referenceJobId: null,
+  voiceProfiles: [],
+  voiceProfileId: "",
   refreshing: false,
   mutation: false,
   connected: false,
@@ -59,6 +63,7 @@ const statuses = {
 };
 
 const phases = {
+  reference: "参考录音整理与本地识别",
   reusing: "准备兼容语音缓存",
   starting: "准备模型与任务",
   generating: "批量合成",
@@ -71,6 +76,17 @@ const phases = {
 };
 
 const serviceMessages = {
+  "Select between 1 and 5 recordings of the same speaker": "请选择同一人的 1～5 段录音。",
+  "Enter the exact transcript or install the local ASR environment": "请填写录音的准确原话，或安装本地语音识别环境。",
+  "The selected recordings exceed 60 seconds; shorten the selected ranges": "选中的录音超过 60 秒，请缩短每段的起止范围。",
+  "The combined reference exceeds 60 seconds including pauses; shorten the ranges": "加上段间停顿后超过 60 秒，请稍微缩短范围。",
+  "Each source recording must be no longer than 10 minutes; select a shorter file": "每个原始录音最多 10 分钟，请选一段较短的录音。",
+  "Select a valid start and end within the recording": "起点和终点需要位于录音内，终点大于起点。",
+  "The selected recording is silent or too quiet; choose a clearer recording": "选中的录音没有足够清晰的人声，请换一段较清楚的录音。",
+  "No usable speech level was found in the selected recording": "选中的录音音量太低，请选择能清楚听见的人声。",
+  "Each selected clip must contain at least one second of usable audio": "每段至少需要一秒可用的人声，请延长范围。",
+  "Local recognition returned no speech; enter the exact transcript manually": "未识别到文字。请试听录音，并手动填写准确原话。",
+  "A reference recording exceeds the 64 MB limit": "每段参考录音最多 64 MB，请选择较短的文件。",
   "An existing command-line conversion is running; this queue will wait": "之前启动的命令行任务正在运行。新任务已排队，将等待它结束后使用 GPU。",
   "Conversion failed; inspect the retained log": "本次生成没有完成。进度与日志已保留，请查看下方运行记录。",
   "Native picker is unavailable; use browser upload instead": "当前系统无法打开原生文件选择器，请使用“选择文件”上传书稿。",
@@ -87,7 +103,9 @@ const serviceMessages = {
 };
 
 function readableMessage(message) {
-  return serviceMessages[message] || message;
+  const text = String(message || "");
+  const withoutType = text.replace(/^(?:ValueError|RuntimeError|TimeoutError|FileNotFoundError):\s*/, "");
+  return serviceMessages[text] || serviceMessages[withoutType] || text;
 }
 
 function node(tag, className, content) {
@@ -158,6 +176,7 @@ async function mutate(message, action, button) {
     if (button) button.disabled = false;
     updateQueueControls();
     updateSelection();
+    updateReferenceControls();
   }
 }
 
@@ -253,6 +272,7 @@ function collectSettings(requireReference = true) {
     settings.chapters = chapters.replace(/\s/g, "");
   }
   if (state.mode === "clone") {
+    if (requireReference && state.referenceJobId) throw new Error("参考录音正在排队或整理，请等完成后校对文字，再生成试听。");
     if (requireReference && !state.reference) throw new Error("请先选择参考音频。");
     if (requireReference && !elements.referenceText.value.trim()) throw new Error("请填写参考音频的完整原话。");
     settings.voice.reference_audio = state.reference ? state.reference.id || state.reference.path : null;
@@ -266,7 +286,8 @@ function persistSettings() {
     const settings = collectSettings(false);
     localStorage.setItem(STORAGE_KEY, JSON.stringify({settings, selected: [...state.selected], reference: state.reference,
       defaultVoiceRevision: state.info?.default_voice_revision || DEFAULT_VOICE_REVISION,
-      monitorOverrides: state.monitorOverrides}));
+      monitorOverrides: state.monitorOverrides, referenceClips: state.referenceClips,
+      referenceJobId: state.referenceJobId, voiceProfileId: state.voiceProfileId}));
   } catch (_) {
     // Invalid intermediate values remain editable without replacing the last valid profile.
   }
@@ -279,6 +300,9 @@ function loadSavedSettings() {
       state.saved = saved;
       state.selected = new Set(Array.isArray(saved.selected) ? saved.selected.map(String) : []);
       state.reference = saved.reference && typeof saved.reference === "object" ? saved.reference : null;
+      state.referenceClips = Array.isArray(saved.referenceClips) ? saved.referenceClips.filter(clip => clip && typeof clip.id === "string").slice(0, 5) : [];
+      state.referenceJobId = typeof saved.referenceJobId === "string" ? saved.referenceJobId : null;
+      state.voiceProfileId = typeof saved.voiceProfileId === "string" ? saved.voiceProfileId : "";
       state.monitorOverrides = saved.monitorOverrides && typeof saved.monitorOverrides === "object" ? saved.monitorOverrides : {};
     }
   } catch (_) {
@@ -348,6 +372,7 @@ function setMode(mode, preferredPath = "") {
   elements.cloneMode.classList.toggle("active", mode === "clone");
   elements.presetFields.classList.toggle("hidden", mode !== "preset");
   elements.cloneFields.classList.toggle("hidden", mode !== "clone");
+  elements.cloneWorkshop.classList.toggle("hidden", mode !== "clone");
   const models = (state.info?.models || []).filter(model => model.available !== false && model.mode === mode);
   elements.modelPath.replaceChildren();
   for (const model of models) {
@@ -362,6 +387,163 @@ function setMode(mode, preferredPath = "") {
     elements.modelPath.append(option);
   }
   if ([...elements.modelPath.options].some(option => option.value === preferredPath)) elements.modelPath.value = preferredPath;
+  updateHardwareDetail();
+}
+
+function updateHardwareDetail() {
+  const info = state.info || {};
+  const hardware = info.hardware || {};
+  const gpu = info.gpu || hardware.gpu || {};
+  const memory = gpu.total_memory_gib || hardware.gpu_memory_gib || hardware.vram_gb;
+  const modelName = String(elements.modelPath.value || info.defaults?.tts?.model_path || "").split(/[\\/]/).pop();
+  elements.hardwareDetail.textContent = [memory ? `${Number(memory).toFixed(1)} GB 显存` : null, modelName, info.defaults?.tts?.attention?.toUpperCase()].filter(Boolean).join(" · ") || "使用本地模型与项目配置";
+}
+
+function initializeTheme() {
+  const preference = matchMedia("(prefers-color-scheme: dark)");
+  let choice = "system";
+  try { choice = localStorage.getItem("local-audiobook-theme") || "system"; } catch (_) {}
+  elements.themeChoice.value = ["light", "dark", "system"].includes(choice) ? choice : "system";
+  function applyTheme() {
+    const dark = elements.themeChoice.value === "dark" || (elements.themeChoice.value === "system" && preference.matches);
+    document.documentElement.dataset.theme = dark ? "dark" : "light";
+    document.querySelector('meta[name="theme-color"]').content = dark ? "#121916" : "#f5f3ee";
+  }
+  elements.themeChoice.addEventListener("change", () => {
+    try { localStorage.setItem("local-audiobook-theme", elements.themeChoice.value); } catch (_) {}
+    applyTheme();
+  });
+  preference.addEventListener("change", applyTheme);
+  applyTheme();
+}
+
+function updateReferenceControls() {
+  const modern = Boolean(state.info?.features?.reference_preparation);
+  elements.prepareReference.disabled = !modern || !state.referenceClips.length || Boolean(state.referenceJobId);
+  elements.saveVoice.disabled = !state.reference?.prepared || !elements.referenceText.value.trim() || !elements.voiceName.value.trim();
+  elements.archiveVoice.disabled = !state.voiceProfileId;
+  const profile = state.voiceProfiles.find(item => item.id === state.voiceProfileId);
+  elements.referenceName.textContent = state.reference ? `${profile?.name || state.reference.name}${state.reference.duration ? ` · ${state.reference.duration.toFixed(1)} 秒` : ""}` : "尚未准备参考音色";
+  const url = modern && state.reference ? `/api/references/${encodeURIComponent(state.reference.id)}/audio` : null;
+  elements.referencePlayer.classList.toggle("hidden", !url);
+  if (url && elements.referencePlayer.getAttribute("src") !== url) elements.referencePlayer.src = url;
+  if (!url) {
+    elements.referencePlayer.pause();
+    elements.referencePlayer.removeAttribute("src");
+  }
+}
+
+function referenceChanged() {
+  state.reference = null;
+  state.voiceProfileId = "";
+  elements.voiceProfile.value = "";
+  elements.referenceWarnings.textContent = "";
+  elements.referenceStatus.textContent = "录音已修改，请点击整理。空白原话自动识别中文。";
+  updateReferenceControls();
+  persistSettings();
+}
+
+function renderReferenceClips() {
+  elements.referenceClips.replaceChildren();
+  for (const [index, clip] of state.referenceClips.entries()) {
+    const card = node("div", "reference-clip");
+    const heading = node("div", "reference-clip-heading");
+    heading.append(node("strong", "", `${index + 1}. ${clip.name}`));
+    const remove = node("button", "text-button", "移除");
+    remove.type = "button";
+    remove.disabled = Boolean(state.referenceJobId);
+    remove.addEventListener("click", () => {
+      state.referenceClips.splice(index, 1);
+      referenceChanged();
+      renderReferenceClips();
+    });
+    heading.append(remove);
+    card.append(heading);
+    const player = node("audio");
+    player.controls = true;
+    player.preload = "metadata";
+    player.src = `/api/references/${encodeURIComponent(clip.id)}/audio`;
+    player.setAttribute("aria-label", `原录音 ${index + 1}`);
+    card.append(player);
+    const ranges = node("div", "field-row");
+    for (const [key, title] of [["start", "起点 / 秒"], ["end", "终点 / 秒"]]) {
+      const label = node("label", "field");
+      label.append(node("span", "", title));
+      const input = node("input");
+      input.type = "number";
+      input.min = "0";
+      input.max = "600";
+      input.step = "0.1";
+      input.value = clip[key] ?? (key === "start" ? 0 : "");
+      input.placeholder = key === "end" ? "留空到结尾" : "0";
+      input.disabled = Boolean(state.referenceJobId);
+      input.addEventListener("input", () => {
+        clip[key] = input.value === "" ? null : Number(input.value);
+        referenceChanged();
+      });
+      label.append(input);
+      ranges.append(label);
+    }
+    card.append(ranges);
+    const label = node("label", "field");
+    label.append(node("span", "", "选中范围的原话"));
+    const input = node("textarea");
+    input.rows = 2;
+    input.maxLength = 3000;
+    input.placeholder = "中文可留空自动识别；有原话可直接粘贴。";
+    input.value = clip.text || "";
+    input.disabled = Boolean(state.referenceJobId);
+    input.addEventListener("input", () => { clip.text = input.value; referenceChanged(); });
+    label.append(input);
+    card.append(label);
+    elements.referenceClips.append(card);
+  }
+  updateReferenceControls();
+}
+
+async function loadVoiceLibrary() {
+  if (!state.info?.features?.voice_library) return;
+  const result = await api("/api/voices");
+  state.voiceProfiles = result.voices || [];
+  elements.voiceProfile.replaceChildren(node("option", "", "准备一个新音色"));
+  elements.voiceProfile.firstChild.value = "";
+  for (const profile of state.voiceProfiles) {
+    const option = node("option", "", `${profile.name} · ${profile.duration.toFixed(1)} 秒`);
+    option.value = profile.id;
+    elements.voiceProfile.append(option);
+  }
+  elements.voiceProfile.value = state.voiceProfileId;
+  if (!elements.voiceProfile.value) state.voiceProfileId = "";
+  const selected = state.voiceProfiles.find(item => item.id === state.voiceProfileId);
+  if (selected && !elements.voiceName.value.trim()) elements.voiceName.value = selected.name;
+  updateReferenceControls();
+}
+
+function syncReferenceJob() {
+  if (!state.referenceJobId) return;
+  const job = state.jobs.find(item => item.id === state.referenceJobId);
+  if (!job) return;
+  const progress = job.status === "queued" ? `队列第 ${job.queue_position || 1} 位` : `${job.completed || 0}/${job.total || 1} 段`;
+  elements.referenceStatus.textContent = `${statuses[job.status] || job.status} · ${progress}。可在任务区暂停或取消。`;
+  if (job.status === "completed" && job.reference) {
+    state.reference = job.reference;
+    state.voiceProfileId = "";
+    elements.voiceProfile.value = "";
+    elements.referenceText.value = job.reference_text || "";
+    const descriptions = {clipping: "录音存在削波，建议换一段失真较少的录音", quiet: "录音偏轻，建议更靠近麦克风", silence: "空白较多，可缩短范围", short: "参考少于 3 秒，可补充一段清晰人声", long: "参考超过 30 秒，先用较短录音比较效果"};
+    elements.referenceWarnings.textContent = (job.reference_warnings || []).map(warning => `${warning.clip ? `第 ${warning.clip} 段：` : ""}${descriptions[warning.code] || warning.code}`).join("；");
+    (job.reference_clips || []).forEach((clip, index) => { if (state.referenceClips[index]) state.referenceClips[index].text = clip.text; });
+    state.referenceJobId = null;
+    elements.referenceStatus.textContent = "整理完成。试听参考录音、校对原话，然后生成一段新内容试听。";
+    renderReferenceClips();
+    persistSettings();
+  } else if (["failed", "cancelled"].includes(job.status)) {
+    state.referenceJobId = null;
+    elements.referenceStatus.textContent = job.status === "failed" ? readableMessage(String(job.error || "整理失败，请查看任务记录。")) : "整理已取消，可以修改录音后重新整理。";
+    renderReferenceClips();
+    persistSettings();
+  }
+  updateReferenceControls();
 }
 
 function updateRangeLabels() {
@@ -395,6 +577,10 @@ function renderInfo(info) {
   const cloneAvailable = (info.models || []).some(model => model.available !== false && model.mode === "clone");
   elements.cloneMode.disabled = !cloneAvailable;
   elements.cloneMode.title = cloneAvailable ? "使用本地 Base 模型与参考音频" : "需要先安装 Qwen3-TTS Base 模型";
+  const preparationAvailable = Boolean(info.features?.reference_preparation);
+  elements.cloneUpgradeNotice.classList.toggle("hidden", preparationAvailable);
+  for (const id of ["referencePreparation", "voiceLibrary", "saveVoiceControls"]) elements[id].classList.toggle("hidden", !preparationAvailable);
+  elements.referenceInput.multiple = preparationAvailable;
   if (info.features?.native_picker === false) {
     elements.pickButton.disabled = true;
     elements.pickButton.title = "当前系统不支持原生文件选择，请使用“选择文件”上传。";
@@ -407,9 +593,7 @@ function renderInfo(info) {
   const gpu = info.gpu || hardware.gpu || {};
   const deviceName = info.device_name || hardware.device_name || (typeof gpu === "string" ? gpu : gpu.name) || hardware.device || info.defaults?.tts?.device;
   elements.hardwareName.textContent = deviceName || "本地推理环境";
-  const deviceMemory = gpu.total_memory_gib || hardware.gpu_memory_gib || hardware.vram_gb;
-  const modelName = String(info.defaults?.tts?.model_path || "").split(/[\\/]/).pop();
-  elements.hardwareDetail.textContent = [deviceMemory ? `${Number(deviceMemory).toFixed(1)} GB 显存` : null, modelName, info.defaults?.tts?.attention?.toUpperCase()].filter(Boolean).join(" · ") || "使用本地模型与项目配置";
+  updateHardwareDetail();
   if (info.version) elements.versionLabel.textContent = `LOCAL AUDIOBOOK STUDIO · ${info.version}`;
   const settings = mergeConfig(info.defaults || {}, state.saved?.settings || {});
   const voiceRevision = info.default_voice_revision || DEFAULT_VOICE_REVISION;
@@ -738,6 +922,8 @@ function duration(seconds, compact = false) {
 }
 
 function jobTitle(job) {
+  if (job.kind === "reference") return "参考录音整理与识别";
+  if (job.kind === "preview") return "声音试听";
   return job.title || job.book_title || job.name || (job.kind === "preview" ? "声音试听" : "小说生成任务");
 }
 
@@ -873,7 +1059,7 @@ function renderJobDetail() {
   const job = !selected.readonly && state.detail && String(state.detail.id) === String(selected.id) ? {...selected, ...state.detail} : selected;
   const progress = metrics(job);
   elements.activeJobTitle.textContent = jobTitle(job);
-  const subtitle = [job.readonly ? "原有命令行任务 · 仅查看" : job.kind === "preview" ? "真实模型试听 · 使用当前设置快照" : "本地批量生成 · 自动保存进度"];
+  const subtitle = [job.readonly ? "原有命令行任务 · 仅查看" : job.kind === "reference" ? "参考录音整理 · 原始录音保留" : job.kind === "preview" ? "真实模型试听 · 使用当前设置快照" : "本地批量生成 · 自动保存进度"];
   if (job.current_chapter || job.chapter_title) subtitle.push(job.current_chapter || job.chapter_title);
   if (job.phase && phases[job.phase]) subtitle.push(phases[job.phase]);
   if (job.active_batch_size) subtitle.push(`当前批次 ${job.active_batch_size} 段`);
@@ -890,7 +1076,8 @@ function renderJobDetail() {
   if (progress.percent !== null) elements.jobProgress.setAttribute("aria-valuenow", String(progress.percent));
   else elements.jobProgress.removeAttribute("aria-valuenow");
   elements.percentProgress.textContent = progress.percent === null ? "—" : `${progress.percent.toFixed(1)}%`;
-  elements.segmentProgress.textContent = progress.completed === null ? "等待进度信息" : `${progress.completed.toLocaleString()} / ${progress.total === null ? "待确认" : progress.total.toLocaleString()} 段已完成核对`;
+  elements.segmentProgress.textContent = progress.completed === null ? "等待进度信息" : `${progress.completed.toLocaleString()} / ${progress.total === null ? "待确认" : progress.total.toLocaleString()} ${job.kind === "reference" ? "段录音已整理" : "段已完成核对"}`;
+  elements.audioDuration.closest(".metrics-grid").classList.toggle("hidden", job.kind === "reference");
   elements.audioDuration.textContent = duration(progress.audioSeconds);
   elements.speedValue.textContent = progress.rtf === null ? "—" : `${progress.rtf.toFixed(2)} RTF`;
   const metricScope = progress.rtfSource === "current_run" ? "本次合成" : progress.rtfSource === "historical" ? "历史合成" : "合成效率";
@@ -1002,6 +1189,7 @@ async function refresh(force = false) {
         // The next refresh retries initialization after a temporary service restart.
       }
     }
+    syncReferenceJob();
     renderJobs();
     const selected = state.jobs.find(job => String(job.id) === state.activeId);
     if (!selected || (!Array.isArray(selected.logs) && !Array.isArray(selected.exports))) await refreshActiveDetail();
@@ -1031,16 +1219,75 @@ function attachEvents() {
     if (result.files?.length) addFiles(result.files);
   }, elements.pickButton));
   elements.referenceInput.addEventListener("change", () => mutate("正在保存参考音频", async () => {
-    const file = elements.referenceInput.files[0];
-    if (!file) return;
-    const body = new FormData();
-    body.append("file", file);
-    const result = await api("/api/files/reference", {method: "POST", body});
-    state.reference = result.file || result.reference || result;
-    elements.referenceName.textContent = state.reference.name || file.name;
-    persistSettings();
-    showNotice("参考音频已保存。请填写对应的完整原话。", "success");
+    const files = [...elements.referenceInput.files];
+    elements.referenceInput.value = "";
+    if (!files.length) return;
+    if (state.referenceJobId) throw new Error("请等当前整理完成，或先在任务区取消它。");
+    const modern = Boolean(state.info?.features?.reference_preparation);
+    if (modern && state.referenceClips.length + files.length > 5) throw new Error("最多使用 5 段录音；可以先移除一段再添加。");
+    if (files.some(file => file.size > 64 * 1024 ** 2)) throw new Error("每段参考录音最多 64 MB，请选择较短的录音。");
+    for (const file of files) {
+      const body = new FormData();
+      body.append("file", file);
+      const result = await api("/api/files/reference", {method: "POST", body});
+      const reference = result.file || result.reference || result;
+      if (modern) {
+        state.referenceClips.push({...reference, start: 0, end: null, text: ""});
+        referenceChanged();
+        renderReferenceClips();
+      } else {
+        state.reference = reference;
+        updateReferenceControls();
+        persistSettings();
+      }
+    }
+    showNotice(modern ? "录音已保存。可调整起止范围、填写原话，然后点击整理；空白原话自动识别中文。" : "参考录音已保存，请填写准确原话。自动整理和音色库需要重启工作台。", "success");
   }));
+  elements.prepareReference.addEventListener("click", () => mutate("正在安排参考录音整理", async () => {
+    const clips = state.referenceClips.map(clip => ({id: clip.id, start: clip.start ?? 0, end: clip.end ?? null, text: clip.text || ""}));
+    for (const clip of clips) if (!Number.isFinite(clip.start) || clip.start < 0 || (clip.end !== null && (!Number.isFinite(clip.end) || clip.end <= clip.start))) throw new Error("请检查每段录音的起止范围。");
+    if (!state.info.features?.reference_asr && clips.some(clip => !clip.text.trim())) throw new Error("本地识别环境未安装，请填写每段录音的原话。");
+    const job = await api("/api/references/prepare", {method: "POST", body: {clips}});
+    state.referenceJobId = job.id;
+    state.reference = null;
+    state.activeId = job.id;
+    state.detail = null;
+    renderReferenceClips();
+    persistSettings();
+    await refresh(true);
+    showNotice("录音整理已进入队列。完成后校对文字、保存音色，再生成新内容试听。", "success");
+  }, elements.prepareReference));
+  elements.voiceProfile.addEventListener("change", () => {
+    const profile = state.voiceProfiles.find(item => item.id === elements.voiceProfile.value);
+    if (state.referenceJobId) {
+      elements.voiceProfile.value = state.voiceProfileId;
+      showNotice("请等当前整理完成，或先在任务区取消它。", "info");
+      return;
+    }
+    state.voiceProfileId = profile?.id || "";
+    state.reference = profile?.reference || null;
+    elements.referenceText.value = profile?.text || "";
+    elements.voiceName.value = profile?.name || "";
+    elements.referenceWarnings.textContent = "";
+    updateReferenceControls();
+    persistSettings();
+  });
+  elements.saveVoice.addEventListener("click", () => mutate("正在保存本地音色", async () => {
+    const profile = await api("/api/voices", {method: "POST", body: {name: elements.voiceName.value.trim(), reference_id: state.reference.id, text: elements.referenceText.value.trim()}});
+    state.voiceProfileId = profile.id;
+    state.reference = profile.reference;
+    await loadVoiceLibrary();
+    persistSettings();
+    showNotice("音色已保存在本机，下次可直接选择。请先生成新内容试听。", "success");
+  }, elements.saveVoice));
+  elements.archiveVoice.addEventListener("click", () => mutate("正在移出音色库", async () => {
+    await api(`/api/voices/${encodeURIComponent(state.voiceProfileId)}/archive`, {method: "POST"});
+    state.voiceProfileId = "";
+    await loadVoiceLibrary();
+    persistSettings();
+    showNotice("已移出音色库。当前参考录音和已有任务音频会保留。", "success");
+  }, elements.archiveVoice));
+  for (const input of [elements.voiceName, elements.referenceText]) input.addEventListener("input", () => { updateReferenceControls(); persistSettings(); });
   for (const event of ["dragenter", "dragover"]) elements.dropZone.addEventListener(event, event => {
     event.preventDefault();
     elements.dropZone.classList.add("dragging");
@@ -1074,6 +1321,7 @@ function attachEvents() {
     input.addEventListener("input", () => {
       updateRangeLabels();
       if (input.id === "speaker") updateVoiceDescription();
+      if (input.id === "modelPath") updateHardwareDetail();
       if (planInputs.has(input.id)) invalidatePlan();
       persistSettings();
     });
@@ -1083,7 +1331,11 @@ function attachEvents() {
     if (!state.info) return;
     state.saved = null;
     state.reference = null;
+    if (!state.referenceJobId) state.referenceClips = [];
+    state.voiceProfileId = "";
+    elements.voiceProfile.value = "";
     applySettings(state.info.defaults || {});
+    renderReferenceClips();
     if (!state.info.default_voice_revision) applyMaturePreset();
     invalidatePlan();
     persistSettings();
@@ -1096,6 +1348,7 @@ function attachEvents() {
 }
 
 async function initialize() {
+  initializeTheme();
   loadSavedSettings();
   attachEvents();
   const results = await Promise.allSettled([api("/api/info"), api("/api/files")]);
@@ -1113,6 +1366,8 @@ async function initialize() {
     showNotice(`无法读取书稿列表：${results[1].reason.message}`, "error");
   }
   renderFiles();
+  renderReferenceClips();
+  try { await loadVoiceLibrary(); } catch (error) { showNotice(`无法读取本地音色库：${error.message}`, "error"); }
   await refresh(true);
   setInterval(() => refresh(), 3000);
 }
