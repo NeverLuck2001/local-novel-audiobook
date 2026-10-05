@@ -15,7 +15,7 @@ Model installation requires a download. Conversion uses local model directories 
 - Light/dark/system themes, remembered in the browser without changing generation settings.
 - Independent output speed (0.75–1.5×), pitch (±3 semitones), pauses, and loudness controls.
 - Explicit pronunciation replacements: retain source text and check ASR against the spoken text.
-- Opt-in URL, downloader front matter, and user-specified line-pattern removal.
+- Automatic recognized Shaft/Pixiv metadata cleanup; optional URL, chapter-prefix front matter, and user-specified line-pattern removal.
 - One GPU queue with durable order/positions, run-next priority, safe pause/cancellation, resume, and failed-segment retries.
 - Cancel all waiting jobs without stopping the active job; hide and restore stopped records without deleting audio.
 - Progress, generated duration, measured generation time, RTF, approximate ETA, and logs.
@@ -23,6 +23,10 @@ Model installation requires a download. Conversion uses local model directories 
 - Official batched inference, SHA256-checked segment caches, retained QC and failure reports.
 - FLAC/WAV/MP3 chapters and complete M4B exports with chapter markers and EPUB cover.
 - Multi-task ZIP downloads and optional automatic collection when the queue is idle; download preferences are independent of synthesis settings.
+
+Version 0.4.0 uses scrollable, searchable lists for books, jobs and saved voices, with select-all, bulk deletion and restoration. The task list sits beside its progress detail on desktop and stacks on narrower screens; long chapters, reference clips and exports also scroll within bounded panels. Book deletion is now stored on the server and survives reloads. **Show deleted** exposes recoverable records; original books, recordings, caches and exports are retained. Deleting a queued job cancels it; deleting a running studio job requests cooperative cancellation and removes its record after the worker stops. External conversions remain read-only until they stop. Download search does not restrict automatic collection.
+
+**Automatically clean Shaft / Pixiv headers** is enabled by default (`text.strip_downloader_metadata`). It recognizes standalone Shaft start/end markers and contiguous metadata fields, or an initial title/author block with a Pixiv source URL. It works for short stories without chapter headings, keeps title/author as TXT book metadata and shows removed material in the cleanup audit. Normal prose and ordinary author/description lines remain intact; ambiguous multiline synopsis prose is retained for review. URL removal also understands Markdown links, preserving meaningful link labels. Toggle this option off to retain recognized headers, and inspect the reading preview before generating. Existing source files and task snapshots are not rewritten.
 
 Version 0.2.3 adds a **Mature narrator / slightly faster** shortcut and makes it the default for new studio jobs: Vivian, a composed/confident delivery instruction, 1.15x output rate, and -1 semitone. The first browser migration applies only these voice/output defaults; other saved controls remain intact. Existing jobs keep their snapshots. CustomVoice style control is an approximation, not an arbitrary new voice design; listen to a short preview before a long book. Disable pitch adjustment if FFmpeg lacks `rubberband`.
 

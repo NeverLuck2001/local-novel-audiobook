@@ -47,6 +47,9 @@ def clean_text(text: str, cfg: TextConfig) -> tuple[str, list[dict]]:
     text = re.sub(r"[ \t]+", " ", text)
     text = "\n".join(line.strip() for line in text.splitlines())
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    if cfg.strip_downloader_metadata:
+        text, records = strip_downloader_metadata(text)
+        audit.extend(records)
     if cfg.remove_urls:
         # Restrict matching to ASCII URL characters so adjacent Chinese prose
         # remains intact. Bare domains are removed only on domain-only lines.
@@ -56,6 +59,13 @@ def clean_text(text: str, cfg: TextConfig) -> tuple[str, list[dict]]:
             value = match.group().rstrip(".,;!?)")
             urls.append(value)
             return match.group()[len(value):]
+        # Keep meaningful labels, but remove Markdown syntax around URL labels.
+        markdown_link = re.compile(r"\[([^\]\n]{0,500})\]\(\s*((?:https?://|www\.)[^\s)\n]+)\s*\)", re.I)
+        def remove_link(match):
+            label, url = match.groups()
+            urls.append(url)
+            return "" if url_pattern.fullmatch(label.strip()) else label
+        text = markdown_link.sub(remove_link, text)
         text = url_pattern.sub(remove_url, text)
         bare_domain = re.compile(
             r"(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:com|net|org|cn|cc|io|me|info|xyz|top|site|vip|co|tv)"
@@ -105,6 +115,67 @@ def clean_text(text: str, cfg: TextConfig) -> tuple[str, list[dict]]:
     if original != text:
         audit.append({"operation": "format_cleanup", "before_chars": len(original), "after_chars": len(text)})
     return text.strip(), audit
+
+
+def strip_downloader_metadata(text: str) -> tuple[str, list[dict]]:
+    """Remove recognized Shaft/Pixiv headers, including chapterless short stories.
+
+    Stop at the first prose line. A bare title/author/description inside a story
+    is never sufficient evidence; retain ambiguous synopsis continuation text.
+    """
+    marker = re.compile(r"^<={3,}\s*Shaft\s+Novel\s+(Start|End)\s*={3,}>$", re.I)
+    field = re.compile(r"^(标题|作者|作者链接|小说链接|标签|简介|Title|Author|Tags|Description)\s*[:：]\s*(.*)$", re.I)
+    body = re.compile(r"^(?:正文|小说正文|小说内容|Body|Content)\s*[:：]\s*(.*)$", re.I)
+    lines = text.splitlines()
+    kept, removed, metadata = [], [], {}
+    header, recognized = False, False
+    # An unmarked Pixiv header needs both metadata fields and a source URL.
+    nonempty = [line for line in lines[:80] if line.strip()]
+    prefix = []
+    for line in nonempty:
+        if not field.fullmatch(line):
+            break
+        prefix.append(line)
+    keys = {field.fullmatch(line)[1].casefold() for line in prefix}
+    pixiv_header = (len(prefix) >= 3 and bool(keys & {"标题", "title"})
+                    and bool(keys & {"作者", "author"})
+                    and any(re.search(r"https?://(?:www\.)?pixiv\.net/", line, re.I) for line in prefix))
+    header = pixiv_header
+    recognized = pixiv_header
+    for line in lines:
+        match = marker.fullmatch(line.strip())
+        if match and (match[1].casefold() == "start" or recognized):
+            removed.append(line)
+            header = match[1].casefold() == "start"
+            recognized = True
+            continue
+        if header:
+            entry = field.fullmatch(line)
+            if entry:
+                key = entry[1].casefold()
+                if key in {"标题", "title", "作者", "author"}:
+                    metadata.setdefault("title" if key in {"标题", "title"} else "author", entry[2].strip()[:500])
+                removed.append(line)
+                continue
+            if not line.strip():
+                removed.append(line)
+                continue
+            start = body.fullmatch(line)
+            if start:
+                removed.append(line[:len(line) - len(start[1])])
+                if start[1].strip():
+                    kept.append(start[1])
+                header = False
+                continue
+            header = False
+        kept.append(line)
+    if not removed:
+        return text, []
+    removed_text = "\n".join(removed).strip()
+    return "\n".join(kept).strip(), [{"operation": "strip_downloader_metadata",
+            "removed": removed_text[:2000], "removed_chars": len(removed_text),
+            "removed_sha256": digest(removed_text), "preview_truncated": len(removed_text) > 2000,
+            "metadata": metadata}]
 
 
 def spoken_text(text: str, replacements: dict[str, str]) -> tuple[str, list[dict]]:

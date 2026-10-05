@@ -216,6 +216,7 @@ class JobManager:
                 "features": {"native_picker": True, "preview": True, "pause": True,
                              "cancel": True, "queue_ordering": True, "archive": True,
                              "monitor_archive": True, "batch_download": True,
+                             "list_management": True, "downloader_cleanup": True,
                               "reference_preparation": True, "reference_video": True, "voice_library": True,
                               "reference_video_suffixes": sorted(VIDEO_SUFFIXES),
                               "reference_asr": (self.default_config.quality.asr_python.is_file()
@@ -289,9 +290,29 @@ class JobManager:
             atomic_json(self.files_path, self.files)
         return item
 
-    def list_files(self) -> list[dict]:
+    def list_files(self, include_archived=False) -> list[dict]:
         with self.lock:
-            return [dict(item) for item in self.files.values() if Path(item["path"]).is_file()]
+            return [dict(item) for item in self.files.values() if Path(item["path"]).is_file()
+                    and (include_archived or not item.get("archived"))]
+
+    def archive_records(self, collection: str, identifiers: list[str], archived=True) -> dict:
+        """Persist reversible list removal without deleting source files or snapshots."""
+        registries = {"files": (self.files, self.files_path), "voices": (self.voice_profiles, self.voices_path)}
+        if collection not in registries or not 1 <= len(identifiers) <= 200:
+            raise ValueError("Select between 1 and 200 records")
+        identifiers = list(dict.fromkeys(identifiers))
+        records, path = registries[collection]
+        with self.lock:
+            if any(identifier not in records for identifier in identifiers):
+                raise KeyError("Unknown record")
+            for identifier in identifiers:
+                if collection == "voices" and not archived:
+                    for other_id, profile in records.items():
+                        if other_id != identifier and profile["name"].casefold() == records[identifier]["name"].casefold():
+                            profile["archived"] = True
+                records[identifier]["archived"] = bool(archived)
+            atomic_json(path, records)
+        return {"ids": identifiers, "count": len(identifiers), "archived": bool(archived)}
 
     def reference_file(self, identifier: str) -> dict:
         with self.lock:
@@ -300,10 +321,11 @@ class JobManager:
                 raise KeyError(identifier)
             return dict(item)
 
-    def list_voices(self) -> list[dict]:
+    def list_voices(self, include_archived=False) -> list[dict]:
         with self.lock:
             return [dict(profile) for profile in self.voice_profiles.values()
-                    if not profile.get("archived") and Path(profile["reference"]["path"]).is_file()]
+                    if (include_archived or not profile.get("archived"))
+                    and Path(profile["reference"]["path"]).is_file()]
 
     def save_voice(self, name: str, reference_id: str, text: str) -> dict:
         name, text = name.strip(), text.strip()
@@ -331,12 +353,8 @@ class JobManager:
             return dict(profile)
 
     def archive_voice(self, identifier: str) -> dict:
-        with self.lock:
-            if identifier not in self.voice_profiles:
-                raise KeyError(identifier)
-            self.voice_profiles[identifier]["archived"] = True
-            atomic_json(self.voices_path, self.voice_profiles)
-            return {"id": identifier, "archived": True}
+        self.archive_records("voices", [identifier])
+        return {"id": identifier, "archived": True}
 
     def create_reference(self, clips: list[dict]) -> dict:
         """Use the existing persistent queue to serialize reference ASR with TTS."""
@@ -383,7 +401,7 @@ class JobManager:
         with self.lock:
             for identifier in identifiers:
                 item = self.files.get(identifier)
-                if not item or item["kind"] != "book" or not Path(item["path"]).is_file():
+                if not item or item["kind"] != "book" or item.get("archived") or not Path(item["path"]).is_file():
                     raise ValueError("Selected input is missing; select the file again")
                 records.append(dict(item))
         return records
@@ -823,6 +841,8 @@ class JobManager:
         job.update(status=status, finished_at=now(), returncode=returncode, pid=None,
                    process_created=None, blocked_reason=None, error="; ".join(errors) or
                    ("Conversion failed; inspect the retained log" if status == "failed" else None))
+        if job.pop("archive_when_stopped", False):
+            job["archived"] = True
         if status == "completed" and reference_ready:
             item = self.register_file(Path(reference["path"]), reference=True)
             item.update(prepared=True, duration=reference["duration"], sha256=reference["sha256"])
@@ -901,7 +921,21 @@ class JobManager:
                 cancelled.append(job["id"])
         return {"cancelled": cancelled, "count": len(cancelled)}
 
-    def action(self, identifier: str, action: str) -> dict:
+    def bulk_jobs(self, identifiers: list[str], action: str) -> dict:
+        """Validate the entire selection before applying persistent queue actions."""
+        if action not in {"remove", "unarchive", "cancel"} or not 1 <= len(identifiers) <= 200:
+            raise ValueError("Select between 1 and 200 jobs and a supported action")
+        identifiers = list(dict.fromkeys(identifiers))
+        with self.lock:
+            if any(identifier not in self.jobs for identifier in identifiers):
+                raise KeyError("Unknown job")
+            if action == "cancel" and any(self.jobs[identifier]["status"] == "completed" for identifier in identifiers):
+                raise ValueError("Completed jobs cannot be cancelled; archive the record instead")
+            for identifier in identifiers:
+                self.action(identifier, action, include_detail=False)
+        return {"ids": identifiers, "count": len(identifiers), "action": action}
+
+    def action(self, identifier: str, action: str, *, include_detail=True) -> dict:
         with self.lock:
             job = self.jobs.get(identifier)
             if not job:
@@ -935,12 +969,20 @@ class JobManager:
                 if job["status"] not in TERMINAL or self._owned_alive(job):
                     raise ValueError("Only stopped jobs can be archived")
                 job["archived"] = True
+            elif action == "remove":
+                if job["status"] in ACTIVE | {"queued"}:
+                    self._cancel(job)
+                if self._owned_alive(job):
+                    job["archive_when_stopped"] = True
+                else:
+                    job["archived"] = True
             elif action == "unarchive":
                 job["archived"] = False
+                job.pop("archive_when_stopped", None)
             else:
                 raise ValueError("Unknown job action")
             self._save(job)
-        return self.detail(identifier)
+        return self.detail(identifier) if include_detail else dict(job)
 
     def _summary(self, work: Path) -> dict:
         key = str(work.resolve())

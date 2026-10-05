@@ -91,6 +91,7 @@ class TextConfig(StrictModel):
     encoding: str | None = None
     chapter_pattern: str = r"^(?:第[零〇一二三四五六七八九十百千万两\d]+[章节回卷部篇](?:\s*.*)?|Chapter\s+\d+\b.*|序章(?:\s+.*)?|楔子(?:\s+.*)?|尾声(?:\s+.*)?)$"
     remove_urls: bool = False
+    strip_downloader_metadata: bool = True
     strip_front_matter: bool = False
     remove_line_patterns: list[str] = []
     pronunciation_map: dict[str, str] = {}
