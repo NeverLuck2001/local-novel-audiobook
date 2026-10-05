@@ -91,6 +91,12 @@ const serviceMessages = {
   "Each selected clip must contain at least one second of usable audio": "每段至少需要一秒可用的人声，请延长范围。",
   "Local recognition returned no speech; enter the exact transcript manually": "未识别到文字。请试听录音，并手动填写准确原话。",
   "A reference recording exceeds the 64 MB limit": "每段参考录音最多 64 MB，请选择较短的文件。",
+  "A reference video exceeds the 512 MB limit": "每个参考视频最多 512 MB，请选择较短的视频。",
+  "The video has no audio track; choose a video containing speech": "这个视频没有音轨，请选择包含人声的视频。",
+  "The video duration is invalid; choose another video": "无法读取视频时长，请换一个完整、可播放的视频文件。",
+  "Each source video must be no longer than 10 minutes; select a shorter file": "每个参考视频最多 10 分钟，请先截取较短的视频。",
+  "The video cannot be decoded into usable audio; choose another video": "无法从视频提取可用音频，请换一个完整、可播放的视频文件。",
+  "Upload TXT/EPUB books or a supported reference audio/video file": "书稿支持 TXT/EPUB；参考素材支持 WAV、MP3、FLAC、M4A、OGG 和 MP4、M4V、MOV、MKV、WebM、AVI。",
   "An existing command-line conversion is running; this queue will wait": "之前启动的命令行任务正在运行。新任务已排队，将等待它结束后使用 GPU。",
   "Conversion failed; inspect the retained log": "本次生成没有完成。进度与日志已保留，请查看下方运行记录。",
   "Native picker is unavailable; use browser upload instead": "当前系统无法打开原生文件选择器，请使用“选择文件”上传书稿。",
@@ -467,6 +473,9 @@ function renderReferenceClips() {
     });
     heading.append(remove);
     card.append(heading);
+    if (clip.source_kind === "video") {
+      card.append(node("small", "hint", `已从视频提取第一条音轨 · ${Number(clip.duration).toFixed(1)} 秒。可按下方时间选择人声片段。`));
+    }
     const player = node("audio");
     player.controls = true;
     player.preload = "metadata";
@@ -589,6 +598,11 @@ function renderInfo(info) {
   elements.cloneUpgradeNotice.classList.toggle("hidden", preparationAvailable);
   for (const id of ["referencePreparation", "voiceLibrary", "saveVoiceControls"]) elements[id].classList.toggle("hidden", !preparationAvailable);
   elements.referenceInput.multiple = preparationAvailable;
+  elements.referenceInput.accept = [".wav", ".mp3", ".flac", ".m4a", ".ogg",
+    ...(info.features?.reference_video_suffixes || [])].join(",");
+  elements.referenceUploadHint.textContent = info.features?.reference_video
+    ? "音频：WAV / MP3 / FLAC / M4A / OGG，最多 64 MB；视频：MP4 / M4V / MOV / MKV / WebM / AVI，最多 512 MB、10 分钟。自动提取第一条音轨。"
+    : "音频：WAV / MP3 / FLAC / M4A / OGG，最多 64 MB；视频自动提取需要重启工作台加载更新。";
   if (info.features?.native_picker === false) {
     elements.pickButton.disabled = true;
     elements.pickButton.title = "当前系统不支持原生文件选择，请使用“选择文件”上传。";
@@ -1441,14 +1455,20 @@ function attachEvents() {
     const result = await api("/api/files/pick", {method: "POST"});
     if (result.files?.length) addFiles(result.files);
   }, elements.pickButton));
-  elements.referenceInput.addEventListener("change", () => mutate("正在保存参考音频", async () => {
+  elements.referenceInput.addEventListener("change", () => mutate("正在保存参考素材；视频将自动提取音频", async () => {
     const files = [...elements.referenceInput.files];
     elements.referenceInput.value = "";
     if (!files.length) return;
     if (state.referenceJobId) throw new Error("请等当前整理完成，或先在任务区取消它。");
     const modern = Boolean(state.info?.features?.reference_preparation);
     if (modern && state.referenceClips.length + files.length > 5) throw new Error("最多使用 5 段录音；可以先移除一段再添加。");
-    if (files.some(file => file.size > 64 * 1024 ** 2)) throw new Error("每段参考录音最多 64 MB，请选择较短的录音。");
+    const videoSuffixes = state.info?.features?.reference_video_suffixes || [];
+    for (const file of files) {
+      const suffix = `.${file.name.split(".").pop().toLowerCase()}`;
+      const video = videoSuffixes.includes(suffix);
+      if (!elements.referenceInput.accept.split(",").includes(suffix)) throw new Error("当前后台不支持此参考格式；视频自动提取需要重启工作台加载更新。");
+      if (file.size > (video ? 512 : 64) * 1024 ** 2) throw new Error(video ? "每个参考视频最多 512 MB，请选择较短的视频。" : "每段参考录音最多 64 MB，请选择较短的录音。");
+    }
     for (const file of files) {
       const body = new FormData();
       body.append("file", file);
@@ -1464,7 +1484,7 @@ function attachEvents() {
         persistSettings();
       }
     }
-    showNotice(modern ? "录音已保存。可调整起止范围、填写原话，然后点击整理；空白原话自动识别中文。" : "参考录音已保存，请填写准确原话。自动整理和音色库需要重启工作台。", "success");
+    showNotice(modern ? "参考音频已保存，视频已自动提取音频。可试听并调整起止范围、填写原话，然后点击整理；空白原话自动识别中文。" : "参考录音已保存，请填写准确原话。自动整理和音色库需要重启工作台。", "success");
   }));
   elements.prepareReference.addEventListener("click", () => mutate("正在安排参考录音整理", async () => {
     const clips = state.referenceClips.map(clip => ({id: clip.id, start: clip.start ?? 0, end: clip.end ?? null, text: clip.text || ""}));

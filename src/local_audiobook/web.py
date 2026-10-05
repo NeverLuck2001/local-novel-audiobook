@@ -12,13 +12,14 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from .downloads import stream_zip
 from .jobs import BOOK_SUFFIXES, JobManager, REFERENCE_SUFFIXES
 from .util import safe_name
+from .voices import MAX_REFERENCE_UPLOAD_BYTES, MAX_VIDEO_UPLOAD_BYTES, VIDEO_SUFFIXES
 
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024
-MAX_REFERENCE_UPLOAD_BYTES = 64 * 1024 * 1024
 PICKER_LOCK = threading.Lock()
 DownloadId = Annotated[str, Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")]
 DownloadFormat = Literal["flac", "m4b", "mp3", "wav"]
@@ -115,23 +116,28 @@ def create_app(app_root: Path | None = None, workspace: Path | None = None) -> F
     async def save_upload(file: UploadFile, reference=False):
         suffix = Path(file.filename or "").suffix.lower()
         if suffix not in (REFERENCE_SUFFIXES if reference else BOOK_SUFFIXES):
-            raise ValueError("Upload TXT/EPUB books or a supported reference audio file")
+            raise ValueError("Upload TXT/EPUB books or a supported reference audio/video file")
         uploads = manager.root / "uploads"
         uploads.mkdir(exist_ok=True)
         target = uploads / (uuid.uuid4().hex + "-" + safe_name(Path(file.filename).stem, 80) + suffix)
         total = 0
+        video = reference and suffix in VIDEO_SUFFIXES
+        limit = MAX_VIDEO_UPLOAD_BYTES if video else MAX_REFERENCE_UPLOAD_BYTES if reference else MAX_UPLOAD_BYTES
         try:
             with target.open("wb") as stream:
                 while block := await file.read(1024 * 1024):
                     total += len(block)
-                    limit = MAX_REFERENCE_UPLOAD_BYTES if reference else MAX_UPLOAD_BYTES
                     if total > limit:
-                        raise ValueError("A reference recording exceeds the 64 MB limit" if reference else
+                        raise ValueError("A reference video exceeds the 512 MB limit" if video else
+                                         "A reference recording exceeds the 64 MB limit" if reference else
                                          "An uploaded file exceeds the 512 MB limit")
                     stream.write(block)
-            return manager.register_upload(target, Path(file.filename).name, reference=reference)
+            return await run_in_threadpool(manager.register_upload, target, Path(file.filename).name,
+                                           reference=reference)
         except Exception:
             target.unlink(missing_ok=True)
+            if video:
+                target.with_name(target.stem + "-audio.wav").unlink(missing_ok=True)
             raise
         finally:
             await file.close()
@@ -153,7 +159,8 @@ def create_app(app_root: Path | None = None, workspace: Path | None = None) -> F
     @app.get("/api/references/{identifier}/audio")
     def reference_audio(identifier: str):
         item = manager.reference_file(identifier)
-        return FileResponse(item["path"], filename=item["name"])
+        filename = Path(item["name"]).with_suffix(Path(item["path"]).suffix).name
+        return FileResponse(item["path"], filename=filename)
 
     @app.get("/api/voices")
     def voices():

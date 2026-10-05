@@ -26,11 +26,12 @@ from .engine import QwenEngine
 from .pipeline import Pipeline
 from .state import State
 from .util import atomic_json, digest, file_hash, now, safe_name
-from .voices import MAX_REFERENCE_CLIPS, prepare_references
+from .voices import (MAX_REFERENCE_CLIPS, MAX_REFERENCE_UPLOAD_BYTES, MAX_VIDEO_UPLOAD_BYTES,
+                     VIDEO_SUFFIXES, extract_video_audio, prepare_references)
 
 LOG = logging.getLogger(__name__)
 BOOK_SUFFIXES = {".txt", ".epub"}
-REFERENCE_SUFFIXES = {".wav", ".flac", ".mp3", ".m4a", ".ogg"}
+REFERENCE_SUFFIXES = {".wav", ".flac", ".mp3", ".m4a", ".ogg"} | VIDEO_SUFFIXES
 TERMINAL = {"completed", "failed", "paused", "cancelled"}
 ACTIVE = {"running", "pausing", "cancelling"}
 VOICES = [
@@ -215,7 +216,8 @@ class JobManager:
                 "features": {"native_picker": True, "preview": True, "pause": True,
                              "cancel": True, "queue_ordering": True, "archive": True,
                              "monitor_archive": True, "batch_download": True,
-                              "reference_preparation": True, "voice_library": True,
+                              "reference_preparation": True, "reference_video": True, "voice_library": True,
+                              "reference_video_suffixes": sorted(VIDEO_SUFFIXES),
                               "reference_asr": (self.default_config.quality.asr_python.is_file()
                                                 and (self.default_config.quality.asr_model_path / "config.json").is_file()),
                              "chapter_selection": True, "pitch_adjustment": pitch_available,
@@ -264,9 +266,26 @@ class JobManager:
         return item
 
     def register_upload(self, path: Path, name: str, *, reference=False) -> dict:
+        metadata = {}
+        if reference and path.suffix.lower() in VIDEO_SUFFIXES:
+            if path.stat().st_size > MAX_VIDEO_UPLOAD_BYTES:
+                raise ValueError("A reference video exceeds the 512 MB limit")
+            extracted = path.with_name(path.stem + "-audio.wav")
+            try:
+                duration = extract_video_audio(self.audio, path, extracted)
+                metadata = {"source_kind": "video", "source_name": name,
+                            "source_path": str(path.resolve()), "source_size": path.stat().st_size,
+                            "duration": duration}
+                path = extracted
+            except Exception:
+                extracted.unlink(missing_ok=True)
+                raise
+        elif reference and path.stat().st_size > MAX_REFERENCE_UPLOAD_BYTES:
+            raise ValueError("A reference recording exceeds the 64 MB limit")
         item = self.register_file(path, reference=reference, uploaded=True)
         with self.lock:
             item["name"] = name
+            item.update(metadata)
             atomic_json(self.files_path, self.files)
         return item
 

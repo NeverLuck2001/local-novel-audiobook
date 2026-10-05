@@ -1,4 +1,15 @@
-# Release handoff: 0.3.1
+# Release handoff: 0.3.2
+
+## Video reference uploads: 2026-10-05
+
+- Version 0.3.2 adds MP4/M4V/MOV/MKV/WebM/AVI to the clone reference picker. `voices.py` probes video audio/duration and extracts the first audio track as 24 kHz mono PCM WAV; `jobs.py` registers that WAV with retained original-video metadata. `web.py` uses a thread pool for extraction, provides an audio playback filename/MIME type, and removes failed uploads. Video limits are 512 MB/10 minutes; existing audio limits remain 64 MB. Extraction uses CPU FFmpeg and does not enter the GPU queue. No dependencies or synthesis/cache identities changed.
+- The browser explains automatic extraction, labels extracted clips and uses backend feature flags for formats. Older loaded servers keep audio inputs and show a restart notice for videos. The existing range/transcript editors, preparation queue, ASR, library and clone interface receive WAV inputs. Bilingual usage/architecture notes and private-video ignore rules are updated.
+- Verification: all 44 existing checks passed in 51.90 seconds; Python lint, JavaScript syntax and Git whitespace checks passed. An isolated HTTP server with its GPU scheduler disabled accepted an uppercase-extension MP4 and WebM, returned playable audio/wav with matching downloaded hashes, retained originals, and created a WAV-only immutable preparation snapshot. The unchanged preparation function produced the selected 6-second reference at 24 kHz. A two-audio-track MP4 with the second track marked default still extracted the first track, matching its independently decoded WAV SHA256. No-audio, broken and 601-second videos returned helpful 400 responses and left no failed upload files. Existing WAV uploads remained unchanged.
+- The wheel matches all 21 Python/static package files. Existing test sources and configuration files retain their hashes; user jobs continue independently and may update their own status. Demo media/receipts remain in ignored `work/video-validation`; no private video, audio or model data is published. No new GPU synthesis, ASR benchmark, speaker separation or background-music removal is claimed.
+- Verify by adding a short MP4 in Voice cloning, playing the extracted audio, selecting a clean 5–15 second range and preparing it with exact text or local Chinese recognition. Refreshing an old backend alone cannot enable extraction; it must load 0.3.2. Existing worker processes and immutable configurations are retained across a studio restart.
+- The live studio on port 7860 now reports 0.3.2 with video support. Reloading only its HTTP listener retained the running novel worker's PID/creation time and configuration hash, with no stop flag written; the same job remains running. The isolated validation reference was cancelled and its HTTP server stopped after observations.
+
+No tests were written in this update.
 
 ## Batch downloads and automatic collection: 2026-10-05
 

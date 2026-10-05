@@ -1,6 +1,7 @@
 """Bounded local reference preparation for reusable Qwen Base voice prompts."""
 from pathlib import Path
 import math
+import subprocess
 
 import numpy as np
 import soundfile as sf
@@ -12,6 +13,35 @@ REFERENCE_RATE = 24000
 MAX_REFERENCE_SECONDS = 60
 MAX_SOURCE_SECONDS = 600
 MAX_REFERENCE_CLIPS = 5
+VIDEO_SUFFIXES = {".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi"}
+MAX_REFERENCE_UPLOAD_BYTES = 64 * 1024 * 1024
+MAX_VIDEO_UPLOAD_BYTES = 512 * 1024 * 1024
+
+
+def extract_video_audio(audio: AudioTools, source: Path, target: Path) -> float:
+    """Extract the first audio track for playback and the existing reference workflow."""
+    try:
+        probe = audio.probe(source)
+        if not any(stream.get("codec_type") == "audio" for stream in probe.get("streams", [])):
+            raise ValueError("The video has no audio track; choose a video containing speech")
+        try:
+            duration = float(probe["format"]["duration"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("The video duration is invalid; choose another video") from exc
+        if not math.isfinite(duration) or duration <= 0:
+            raise ValueError("The video duration is invalid; choose another video")
+        if duration > MAX_SOURCE_SECONDS:
+            raise ValueError("Each source video must be no longer than 10 minutes; select a shorter file")
+        audio.run(["-i", str(source), "-map", "0:a:0", "-vn", "-sn", "-dn",
+                   "-t", str(MAX_SOURCE_SECONDS), "-ac", "1", "-ar", str(REFERENCE_RATE),
+                   "-c:a", "pcm_s16le", str(target)], timeout=180)
+        wave_info = sf.info(target)
+        if wave_info.frames <= 0 or wave_info.samplerate != REFERENCE_RATE or wave_info.channels != 1:
+            raise ValueError("The video cannot be decoded into usable audio; choose another video")
+        return round(wave_info.duration, 3)
+    except (RuntimeError, subprocess.TimeoutExpired) as exc:
+        raise ValueError("The video cannot be decoded into usable audio; choose another video") from exc
+
 
 
 def prepare_references(audio: AudioTools, clips: list[dict], directory: Path,
