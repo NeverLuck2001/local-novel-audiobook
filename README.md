@@ -11,7 +11,7 @@ Model installation requires a download. Conversion uses local model directories 
 - TXT encoding detection and EPUB spine order, metadata, and cover extraction.
 - Browser file selection and upload, chapter preview and selection, visible cleanup audit.
 - Nine official CustomVoice presets, free-form delivery instructions, short voice previews.
-- Base voice cloning from 1–5 recordings, optional local Chinese transcription, reference playback, and a reusable local voice library.
+- Base voice cloning from 1–5 audio/video clips, automatic local video audio extraction, optional local Chinese transcription, reference playback, and a reusable local voice library.
 - Light/dark/system themes, remembered in the browser without changing generation settings.
 - Independent output speed (0.75–1.5×), pitch (±3 semitones), pauses, and loudness controls.
 - Explicit pronunciation replacements: retain source text and check ASR against the spoken text.
@@ -39,7 +39,7 @@ Install the official Base model once, then restart the studio backend to enable 
 python ui.py
 ```
 
-1. Select **Voice cloning** and add 1–5 recordings of the same speaker (WAV, MP3, FLAC, M4A or OGG). Start with a clean 5–15 second sample; more recordings do not automatically improve similarity. Avoid music, overlapping speakers and strong room echo. Each source is limited to 64 MB and 10 minutes; selected reference audio, including joining pauses, is limited to 60 seconds.
+1. Select **Voice cloning** and add 1–5 recordings of the same speaker (WAV, MP3, FLAC, M4A or OGG), or videos (MP4, M4V, MOV, MKV, WebM or AVI). Videos automatically become playable 24 kHz mono WAV references using their first audio track; originals are retained locally. Audio uploads are limited to 64 MB, videos to 512 MB, and each source to 10 minutes. Videos without audio or with unreadable media are rejected with a helpful message. Start with a clean 5–15 second sample; more recordings do not automatically improve similarity. Avoid music, overlapping speakers and strong room echo. Selected reference audio, including joining pauses, is limited to 60 seconds.
 2. Optionally select start/end times in seconds. An empty end means the end of the file. Enter exactly what was spoken in each selected range, or leave it empty for local **Chinese** recognition. Supply transcripts manually for other languages. Choose whole words and sentences when trimming.
 3. Click **Prepare recordings and recognize text**. This is a persistent queue job, serialized with audiobook generation, with pause/cancel/resume controls. Preparation converts to 24 kHz mono WAV, trims only edge silence, adjusts gain conservatively and joins clips in order. It retains original recordings and reports quiet, clipping, silence and length warnings; it does not detect speaker identity, remove music or guarantee noise reduction.
 4. Play the prepared reference and correct its combined transcript, especially names and numbers. Save a named voice to reuse it later, then generate a short preview of **new** text before a full book. Saved voices contain local audio and text; no fine-tuning or cloud upload occurs. Removing a voice from the library keeps recordings and existing jobs.

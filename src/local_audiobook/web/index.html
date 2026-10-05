@@ -12,8 +12,8 @@
       document.documentElement.dataset.theme = choice === "dark" || (choice !== "light" && matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light";
     } catch (_) {}
   </script>
-  <link rel="stylesheet" href="/styles.css?v=0.3.1">
-  <script src="/app.js?v=0.3.1" defer></script>
+  <link rel="stylesheet" href="/styles.css?v=0.3.2">
+  <script src="/app.js?v=0.3.2" defer></script>
 </head>
 <body>
   <header class="topbar">
@@ -81,7 +81,7 @@
               <label class="field"><span>已保存的音色</span><select id="voiceProfile"><option value="">准备一个新音色</option></select></label>
               <button id="archiveVoice" class="button secondary" type="button" disabled>移出音色库</button>
             </div>
-            <label class="upload-reference" for="referenceInput"><span>添加参考录音</span><small>WAV / MP3 / FLAC / M4A / OGG · 每段最多 64 MB</small></label><input id="referenceInput" class="visually-hidden" type="file" accept=".wav,.mp3,.flac,.m4a,.ogg" multiple>
+            <label class="upload-reference" for="referenceInput"><span>添加参考音频或视频</span><small id="referenceUploadHint">音频最多 64 MB；MP4 等视频最多 512 MB、10 分钟，自动提取第一条音轨。</small></label><input id="referenceInput" class="visually-hidden" type="file" accept=".wav,.mp3,.flac,.m4a,.ogg,.mp4,.m4v,.mov,.mkv,.webm,.avi" multiple>
             <div id="referenceClips" class="reference-clips"></div>
             <div id="referencePreparation" class="clone-preparation"><button id="prepareReference" class="button secondary" type="button" disabled>整理录音并识别文字</button><span id="referenceStatus" class="field-help" role="status" aria-live="polite">空白原话会自动识别中文；其他语言请填写原话。</span></div>
             <audio id="referencePlayer" class="reference-player hidden" controls preload="metadata" aria-label="整理后的参考录音"></audio>

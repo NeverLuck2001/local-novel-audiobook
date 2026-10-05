@@ -29,6 +29,12 @@ dist/
 *.m4a
 *.ogg
 *.m4b
+*.mp4
+*.m4v
+*.mov
+*.mkv
+*.webm
+*.avi
 *.safetensors
 *.pt
 *.pth
