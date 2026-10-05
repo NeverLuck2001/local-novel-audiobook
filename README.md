@@ -22,6 +22,7 @@ Model installation requires a download. Conversion uses local model directories 
 - Read-only monitoring of a conversion started outside the studio; queued jobs wait for it.
 - Official batched inference, SHA256-checked segment caches, retained QC and failure reports.
 - FLAC/WAV/MP3 chapters and complete M4B exports with chapter markers and EPUB cover.
+- Multi-task ZIP downloads and optional automatic collection when the queue is idle; download preferences are independent of synthesis settings.
 
 Version 0.2.3 adds a **Mature narrator / slightly faster** shortcut and makes it the default for new studio jobs: Vivian, a composed/confident delivery instruction, 1.15x output rate, and -1 semitone. The first browser migration applies only these voice/output defaults; other saved controls remain intact. Existing jobs keep their snapshots. CustomVoice style control is an approximation, not an arbitrary new voice design; listen to a short preview before a long book. Disable pitch adjustment if FFmpeg lacks `rubberband`.
 
@@ -46,6 +47,17 @@ python ui.py
 Base uses the recording's voice and delivery rather than CustomVoice instructions. Output speed/pitch still apply; use 1.0x and zero pitch when evaluating similarity. The official model's transcript-free speaker-embedding mode is deliberately not exposed because its quality may be lower. Multiple same-speaker clips become one ordered reference; they are not separate training examples. Official prompt features are computed once and reused across batches within a conversion. See the [official clone API](https://github.com/QwenLM/Qwen3-TTS#voice-clone).
 
 Use the **Theme** selector in the header for light, dark or system appearance. The browser remembers the choice and follows operating-system changes in system mode. Reference uploads, voice profiles, generated audio and downloaded weights stay excluded from Git. An already running older backend needs a restart for reference preparation/library APIs; loading new static files alone is insufficient. Existing conversion children and immutable job snapshots are retained.
+
+## Batch downloads and automatic collection
+
+Version 0.3.1 adds **Downloads and automatic collection** below the task progress panel. Audio is always saved in `output/ui/`; browser downloading is an additional copy.
+
+- Choose FLAC (the default), M4B, MP3 or WAV, select completed tasks and click **Download ZIP**. Each bundle contains the chosen format under separate task/book folders, preserving chapter filenames and audio quality. It includes existing exports only; this selector does not synthesize or convert a missing format. Previews can be selected manually. Removed records appear only when **Show deleted records** is enabled.
+- **Automatically download when the queue is idle** is off by default. Enabling it collects novel tasks completed after activation, combining eligible tasks in one ZIP once no studio task is running or queued. Changing the format or re-enabling the switch starts a new collection window; older results remain available for manual selection. Previews and reference preparation do not trigger automatic downloads.
+- Keep the studio page open. If it is closed while enabled, generation continues and the next page visit collects eligible completed tasks that have not been submitted. Browser-local preferences and submission records prevent normal refreshes from repeating requests; browsers supporting Web Locks also coordinate multiple tabs. Download acceptance/completion is controlled by the browser, so confirm the browser download list and allow site downloads if prompted. A blocked/interrupted download can be retried manually. Save location comes from browser settings.
+- ZIP output streams the original files without staging a large archive on the server or loading the entire download into JavaScript memory. Each request accepts at most 100 completed jobs and 20,000 audio files. Existing per-file links remain available. Downloading never changes job snapshots, generated speech, or queue order.
+
+Restart an older backend to load the batch-download endpoints, then reload the page. Updating static files alone does not upgrade the running Python server.
 
 ## Installation on Windows
 

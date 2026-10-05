@@ -2,6 +2,8 @@
 
 const STORAGE_KEY = "local-audiobook-studio-v1";
 const DEFAULT_VOICE_REVISION = "mature-v1";
+const DOWNLOAD_STORAGE_KEY = "local-audiobook-downloads-v1";
+const DOWNLOAD_FORMATS = ["flac", "m4b", "mp3", "wav"];
 const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map(element => [element.id, element]));
 const state = {
   info: null,
@@ -27,6 +29,8 @@ const state = {
   saved: null,
   showArchived: false,
   monitorOverrides: {},
+  downloads: {format: "flac", auto: false, since: null, submitted: {}, selected: new Set(),
+    busy: false, autoPaused: false, message: "", error: false},
 };
 
 const voiceDescriptions = {
@@ -100,6 +104,10 @@ const serviceMessages = {
   "Only stopped jobs can be archived": "请先暂停或取消任务，等它停止后再隐藏记录。",
   "Stop the external conversion before removing its display record": "原窗口的转换仍在运行。请等它停止后再删除显示记录。",
   "Only paused, failed or cancelled jobs can be resumed": "只有已暂停、失败或已取消的任务可以重新排队。",
+  "Select between 1 and 100 completed jobs": "一次请选择 1～100 个已完成任务。",
+  "Only completed audio jobs can be bundled": "只有已完成的音频任务可以打包，录音整理任务不包含在内。",
+  "A selected job has no exports in the requested format": "有任务尚未导出所选格式。请刷新后重选，下载格式不会自动转码。",
+  "Select fewer jobs; a bundle can contain at most 20000 audio files": "单个压缩包最多 20000 个音频文件，请分批选择任务。",
 };
 
 function readableMessage(message) {
@@ -983,6 +991,10 @@ function safeExportUrl(url) {
   }
 }
 
+function exportFormat(item) {
+  return String(item.format || item.name?.split(".").pop() || "").toLowerCase();
+}
+
 function renderExports(exports) {
   elements.exportList.replaceChildren();
   const available = (Array.isArray(exports) ? exports : []).filter(item => safeExportUrl(item.url));
@@ -990,12 +1002,12 @@ function renderExports(exports) {
     const link = node("a", "export-link");
     link.href = safeExportUrl(item.url);
     link.download = item.name || "";
-    const format = String(item.format || item.name?.split(".").pop() || "AUDIO").toUpperCase();
+    const format = (exportFormat(item) || "audio").toUpperCase();
     const scope = scopeLabel(item);
     link.append(node("small", "", format), node("span", "", `下载 ${item.name || item.book_title || "音频"}${scope ? ` · ${scope}` : ""}`));
     elements.exportList.append(link);
   }
-  const playable = available.find(item => /^(mp3|wav|flac|m4a|ogg)$/i.test(item.format || item.name?.split(".").pop() || "")) || available.find(item => /^m4b$/i.test(item.format || item.name?.split(".").pop() || ""));
+  const playable = available.find(item => /^(mp3|wav|flac|m4a|ogg)$/.test(exportFormat(item))) || available.find(item => exportFormat(item) === "m4b");
   elements.audioPreview.classList.toggle("hidden", !playable);
   const url = playable ? safeExportUrl(playable.url) : null;
   if (url !== state.audioUrl) {
@@ -1006,6 +1018,168 @@ function renderExports(exports) {
     state.audioUrl = url;
   }
   if (playable) elements.audioPreviewName.textContent = `${playable.name || "生成音频"}${scopeLabel(playable) ? ` · ${scopeLabel(playable)}` : ""}`;
+}
+
+function savedDownloads() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(DOWNLOAD_STORAGE_KEY) || "null");
+    return saved && typeof saved === "object" && !Array.isArray(saved) ? saved : {};
+  } catch (_) { return {}; }
+}
+
+function loadDownloadSettings() {
+  const saved = savedDownloads();
+  const downloads = state.downloads;
+  downloads.format = DOWNLOAD_FORMATS.includes(saved.format) ? saved.format : "flac";
+  downloads.auto = saved.auto === true;
+  downloads.since = Number.isFinite(saved.since) && saved.since > 0 ? saved.since : Date.now();
+  downloads.submitted = saved.submitted && typeof saved.submitted === "object" && !Array.isArray(saved.submitted) ? saved.submitted : {};
+  downloads.autoPaused = false;
+}
+
+function persistDownloads() {
+  const downloads = state.downloads;
+  try {
+    localStorage.setItem(DOWNLOAD_STORAGE_KEY, JSON.stringify({format: downloads.format, auto: downloads.auto,
+      since: downloads.since, submitted: downloads.submitted}));
+    return true;
+  } catch (_) {
+    downloads.auto = false;
+    downloads.autoPaused = true;
+    downloads.error = true;
+    downloads.message = "浏览器未能保存下载记录，自动下载已停止；仍可手动下载。";
+    return false;
+  }
+}
+
+function downloadKey(job, format = state.downloads.format) {
+  return `${job.id}:${format}:${job.finished_at || job.created_at || "completed"}`;
+}
+
+function downloadFiles(job, format = state.downloads.format) {
+  const files = new Map();
+  for (const item of Array.isArray(job.exports) ? job.exports : []) {
+    if (exportFormat(item) === format && safeExportUrl(item.url)) files.set(item.id || item.url, item);
+  }
+  return [...files.values()];
+}
+
+function downloadableJobs() {
+  return state.jobs.filter(job => job.status === "completed" && job.kind !== "reference" &&
+    (!job.archived || state.showArchived) && downloadFiles(job).length);
+}
+
+function queueBusy() {
+  return state.jobs.some(job => ["running", "queued", "preparing", "pausing", "cancelling", "stopping"].includes(job.status));
+}
+
+function renderDownloads() {
+  const downloads = state.downloads;
+  const supported = Boolean(state.info?.features?.batch_download);
+  const jobs = downloadableJobs();
+  const focusedJob = document.activeElement?.dataset.downloadJob;
+  downloads.selected = new Set([...downloads.selected].filter(id => jobs.some(job => String(job.id) === id)));
+  elements.downloadFormat.value = downloads.format;
+  elements.autoDownload.checked = downloads.auto;
+  elements.downloadFormat.disabled = downloads.busy;
+  elements.autoDownload.disabled = downloads.busy || !supported;
+  elements.downloadCount.textContent = jobs.length ? `${jobs.length} 个可下载任务` : "暂无可下载任务";
+  elements.downloadHelp.textContent = supported ? "默认选 FLAC，自动下载默认关闭。这里只收取已经生成的格式，不会重新合成或转码。" :
+    "批量下载需要 0.3.1 或更新的工作台后台；已有单文件下载链接仍可使用。";
+  elements.downloadList.replaceChildren();
+  for (const job of jobs) {
+    const files = downloadFiles(job);
+    const row = node("label", "download-item");
+    const checkbox = node("input");
+    checkbox.type = "checkbox";
+    checkbox.dataset.downloadJob = String(job.id);
+    checkbox.checked = downloads.selected.has(String(job.id));
+    row.classList.toggle("selected", checkbox.checked);
+    checkbox.disabled = downloads.busy;
+    checkbox.setAttribute("aria-label", `选择下载 ${jobTitle(job)}`);
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) downloads.selected.add(String(job.id));
+      else downloads.selected.delete(String(job.id));
+      renderDownloads();
+    });
+    const copy = node("span", "download-item-copy");
+    const size = files.reduce((sum, item) => sum + (Number(item.size) || 0), 0);
+    const sent = downloads.submitted[downloadKey(job)] ? " · 已提交浏览器，可再次下载" : "";
+    copy.append(node("strong", "", jobTitle(job)), node("small", "", `${files.length} 个 ${downloads.format.toUpperCase()} · ${fileSize(size)}${sent}`));
+    row.append(checkbox, copy);
+    elements.downloadList.append(row);
+  }
+  if (!jobs.length) elements.downloadList.append(node("p", "field-help", `还没有已完成的 ${downloads.format.toUpperCase()} 音频任务。完成后会出现在这里；已删除记录需先勾选“显示已删除记录”。`));
+  if (focusedJob) [...elements.downloadList.querySelectorAll("input")].find(input => input.dataset.downloadJob === focusedJob)?.focus({preventScroll: true});
+  const selected = jobs.filter(job => downloads.selected.has(String(job.id)));
+  const files = selected.flatMap(job => downloadFiles(job));
+  const size = files.reduce((sum, item) => sum + (Number(item.size) || 0), 0);
+  elements.selectDownloads.disabled = !jobs.length || downloads.busy;
+  elements.clearDownloads.disabled = !selected.length || downloads.busy;
+  elements.batchDownload.disabled = !selected.length || selected.length > 100 || downloads.busy || !supported || !state.connected;
+  elements.selectDownloads.textContent = jobs.length > 100 ? "选择前 100 项" : "选择全部";
+  elements.batchDownload.textContent = downloads.busy ? "正在准备下载…" : selected.length ? `批量下载 ZIP（${selected.length}）` : "批量下载 ZIP";
+  elements.downloadSummary.textContent = selected.length ? `已选择 ${selected.length} 个任务、${files.length} 个音频，约 ${fileSize(size)}。${selected.length > 100 ? "单次最多 100 个任务，请减少选择。" : "原文件按任务与书籍分目录保留，音质不变。"}` : "选择已完成任务后，一次下载全部所选音频；每次最多 100 个任务。";
+  elements.downloadStatus.classList.toggle("error", downloads.error);
+  elements.downloadStatus.textContent = downloads.message || (downloads.auto ?
+    queueBusy() ? "自动下载已开启，等待队列空闲后收取新完成的小说。" : "自动下载已开启，等待新完成的小说；重开页面后会补领未提交的结果。" :
+    "自动下载已关闭，音频仍保存在项目输出目录。");
+}
+
+async function withDownloadLock(action, automatic = false) {
+  if (!navigator.locks?.request) return action();
+  return navigator.locks.request("local-audiobook-downloads", automatic ? {ifAvailable: true} : {}, lock => lock ? action() : undefined);
+}
+
+async function submitDownloads(jobs, automatic = false) {
+  const downloads = state.downloads;
+  if (downloads.busy || !jobs.length) return;
+  if (jobs.length > 100) throw new Error("一次最多下载 100 个任务，请分批选择。");
+  const format = downloads.format;
+  downloads.busy = true;
+  downloads.error = false;
+  downloads.message = `正在准备 ${jobs.length} 个任务的下载清单…`;
+  renderDownloads();
+  try {
+    const result = await api("/api/downloads", {method: "POST", body: {jobs: jobs.map(job => String(job.id)), format}});
+    const url = safeExportUrl(result.url);
+    if (!url || new URL(url).pathname !== "/api/downloads") throw new Error("本地服务未返回有效的打包下载地址。");
+    if (automatic && (!downloads.auto || downloads.format !== format)) return;
+    const fresh = savedDownloads();
+    if (automatic && (fresh.auto !== true || fresh.format !== format || fresh.since !== downloads.since)) return;
+    if (fresh.submitted && typeof fresh.submitted === "object" && !Array.isArray(fresh.submitted)) Object.assign(downloads.submitted, fresh.submitted);
+    for (const job of jobs) downloads.submitted[downloadKey(job, format)] = Date.now();
+    const saved = persistDownloads();
+    if (automatic && !saved) return;
+    const link = node("a", "hidden");
+    link.href = url;
+    link.download = "";
+    document.body.append(link);
+    try { link.click(); } finally { link.remove(); }
+    downloads.error = !saved;
+    downloads.message = `${automatic ? "自动收取：" : ""}${result.jobs} 个任务、${result.files} 个音频（约 ${fileSize(result.size)}）已交给浏览器下载。请在浏览器下载列表确认；若被拦截，可允许本站下载后手动重试。${saved ? "" : " 下载记录未能保存，自动下载已停止。"}`;
+  } catch (error) {
+    downloads.error = true;
+    if (automatic) downloads.autoPaused = true;
+    downloads.message = `${error.message}${automatic ? " 自动收取暂时停止，可手动下载或重新开启开关。" : ""}`;
+  } finally {
+    downloads.busy = false;
+    renderDownloads();
+  }
+}
+
+async function maybeAutoDownload() {
+  const downloads = state.downloads;
+  if (!downloads.auto || downloads.autoPaused || downloads.busy || !state.connected || !state.info?.features?.batch_download || queueBusy()) return;
+  await withDownloadLock(async () => {
+    const saved = savedDownloads();
+    if (saved.auto !== true || saved.format !== downloads.format) return;
+    if (Number.isFinite(saved.since) && saved.since > 0) downloads.since = saved.since;
+    if (saved.submitted && typeof saved.submitted === "object" && !Array.isArray(saved.submitted)) Object.assign(downloads.submitted, saved.submitted);
+    const jobs = downloadableJobs().filter(job => (job.kind === "convert" || !job.kind) &&
+      Date.parse(job.finished_at || "") >= downloads.since && !downloads.submitted[downloadKey(job)]);
+    await submitDownloads(jobs.slice(0, 100), true);
+  }, true);
 }
 
 function logText(job) {
@@ -1150,7 +1324,7 @@ async function refreshActiveDetail() {
 }
 
 async function refresh(force = false) {
-  if (state.refreshing || (!force && document.hidden)) return;
+  if (state.refreshing || (!force && document.hidden && !state.downloads.auto)) return;
   state.refreshing = true;
   try {
     if (state.info?.features?.monitor_archive) {
@@ -1194,12 +1368,61 @@ async function refresh(force = false) {
     const selected = state.jobs.find(job => String(job.id) === state.activeId);
     if (!selected || (!Array.isArray(selected.logs) && !Array.isArray(selected.exports))) await refreshActiveDetail();
     updateSelection();
+    renderDownloads();
+    try { await maybeAutoDownload(); } catch (error) {
+      state.downloads.autoPaused = true;
+      state.downloads.error = true;
+      state.downloads.message = `自动收取暂时停止：${error.message}。可以手动下载或重新开启开关。`;
+      renderDownloads();
+    }
   } finally {
     state.refreshing = false;
   }
 }
 
 function attachEvents() {
+  elements.downloadFormat.addEventListener("change", () => {
+    state.downloads.format = elements.downloadFormat.value;
+    state.downloads.since = Date.now();
+    state.downloads.selected.clear();
+    state.downloads.autoPaused = false;
+    state.downloads.message = "";
+    state.downloads.error = false;
+    persistDownloads();
+    renderDownloads();
+  });
+  elements.autoDownload.addEventListener("change", () => {
+    state.downloads.auto = elements.autoDownload.checked;
+    if (state.downloads.auto) state.downloads.since = Date.now();
+    state.downloads.autoPaused = false;
+    state.downloads.message = "";
+    state.downloads.error = false;
+    persistDownloads();
+    renderDownloads();
+  });
+  elements.selectDownloads.addEventListener("click", () => {
+    state.downloads.selected = new Set(downloadableJobs().slice(0, 100).map(job => String(job.id)));
+    renderDownloads();
+  });
+  elements.clearDownloads.addEventListener("click", () => {
+    state.downloads.selected.clear();
+    renderDownloads();
+  });
+  elements.batchDownload.addEventListener("click", async () => {
+    try {
+      await withDownloadLock(() => submitDownloads(downloadableJobs().filter(job => state.downloads.selected.has(String(job.id)))));
+    } catch (error) {
+      state.downloads.error = true;
+      state.downloads.message = error.message;
+      renderDownloads();
+    }
+  });
+  window.addEventListener("storage", event => {
+    if (event.key === DOWNLOAD_STORAGE_KEY) {
+      loadDownloadSettings();
+      renderDownloads();
+    }
+  });
   elements.showArchived.addEventListener("change", () => {
     state.showArchived = elements.showArchived.checked;
     refresh(true);
@@ -1350,6 +1573,7 @@ function attachEvents() {
 async function initialize() {
   initializeTheme();
   loadSavedSettings();
+  loadDownloadSettings();
   attachEvents();
   const results = await Promise.allSettled([api("/api/info"), api("/api/files")]);
   if (results[0].status === "fulfilled") {

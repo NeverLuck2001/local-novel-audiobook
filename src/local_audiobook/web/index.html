@@ -12,8 +12,8 @@
       document.documentElement.dataset.theme = choice === "dark" || (choice !== "light" && matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light";
     } catch (_) {}
   </script>
-  <link rel="stylesheet" href="/styles.css?v=0.3.0">
-  <script src="/app.js?v=0.3.0" defer></script>
+  <link rel="stylesheet" href="/styles.css?v=0.3.1">
+  <script src="/app.js?v=0.3.1" defer></script>
 </head>
 <body>
   <header class="topbar">
@@ -104,6 +104,18 @@
         <section class="card preview-card"><div class="preview-copy"><p class="eyebrow">先听一小段</p><h2>找到适合这本书的声音</h2><p>试听使用真实模型与当前声音设置，会进入同一个生成队列。</p></div><div class="preview-controls"><label class="visually-hidden" for="previewText">试听文本</label><textarea id="previewText" rows="3" maxlength="600">雨停了，窗外的树叶还挂着水珠。她翻开那封迟到的信，轻声说：“故事，就从这里开始吧。”</textarea><button id="previewButton" class="button secondary" type="button"><span aria-hidden="true">▷</span> 生成试听</button></div></section>
 
         <section class="card activity-card" aria-labelledby="activityTitle"><div class="card-header"><div><p class="eyebrow">第二步 · 本地生成</p><h2 id="activityTitle">生成进度</h2></div><span id="queueCount" class="tag">队列为空</span></div><div class="queue-toolbar"><label class="check-field"><input id="showArchived" type="checkbox"><span>显示已删除记录</span></label><button id="cancelQueued" class="button danger" type="button" disabled>取消全部排队任务</button></div><div id="externalNotice" class="inline-notice hidden">检测到之前启动的任务。这里仅查看它的进度；新任务会等待 GPU 空闲。</div><div id="jobList" class="job-list"></div><div id="emptyJobs" class="empty-state"><span class="empty-wave" aria-hidden="true">▂ ▅ ▃ ▇ ▃ ▅ ▂</span><strong>故事的声音，即将开始</strong><p>检查书稿后加入队列，或先生成一段试听。</p></div><div id="jobDetail" class="job-detail hidden"><div class="job-title-row"><div><h3 id="activeJobTitle"></h3><p id="activeJobSubtitle"></p></div><span id="activeJobStatus" class="status-badge"></span></div><div class="progress-track" role="progressbar" id="jobProgress" aria-label="生成进度" aria-valuemin="0" aria-valuemax="100"><div id="progressFill"></div></div><div class="progress-caption"><span id="segmentProgress">等待进度信息</span><strong id="percentProgress">—</strong></div><div class="metrics-grid"><div><span>已生成音频</span><strong id="audioDuration">—</strong></div><div><span>生成速度 <span class="help-mark" title="RTF = 合成用时 ÷ 音频时长；数值越低越快。" aria-label="RTF 数值越低越快">?</span></span><strong id="speedValue">—</strong><small id="speedDetail">RTF，越低越快</small></div><div><span>预计剩余</span><strong id="etaValue">—</strong><small id="etaDetail">有足够数据时显示</small></div><div><span>重试 / 失败</span><strong id="retryValue">—</strong></div></div><div id="jobError" class="inline-notice error hidden"></div><div id="jobActions" class="job-actions"></div><div id="audioPreview" class="audio-preview hidden"><div><span class="eyebrow">真实生成结果</span><strong id="audioPreviewName"></strong></div><audio id="audioPlayer" controls preload="none"></audio></div><div id="exportList" class="export-list"></div><details id="logDetails" class="log-details"><summary>运行记录 <span>查看最近日志与失败原因</span></summary><pre id="jobLog" tabindex="0">暂无运行记录。</pre></details></div></section>
+        <section class="card downloads-card" aria-labelledby="downloadsTitle">
+          <div class="card-header"><div><p class="eyebrow">第三步 · 收取音频</p><h2 id="downloadsTitle">下载与自动收取</h2></div><span id="downloadCount" class="tag">暂无可下载任务</span></div>
+          <div class="downloads-content">
+            <div class="download-settings"><label class="field"><span>下载格式</span><select id="downloadFormat"><option value="flac">FLAC · 无损章节</option><option value="m4b">M4B · 有声书</option><option value="mp3">MP3 · 已生成音频</option><option value="wav">WAV · 已生成章节</option></select></label><label class="check-field"><input id="autoDownload" type="checkbox"><span>队列空闲后自动下载</span></label></div>
+            <p id="downloadHelp" class="field-help">默认选 FLAC，自动下载默认关闭。这里只收取已经生成的格式，不会重新合成或转码。</p>
+            <p class="field-help">开启后自动收取新完成的小说任务，多个任务合并为一个 ZIP；试听可手动下载。保持工作台页面打开，关闭期间的结果会保留，重开页面后补领。浏览器可能要求允许此站点下载，保存位置由浏览器设置决定。</p>
+            <div id="downloadList" class="download-list" aria-label="可批量下载的任务"></div>
+            <div class="download-actions"><div class="download-selection"><button id="selectDownloads" class="text-button" type="button" disabled>选择全部</button><button id="clearDownloads" class="text-button" type="button" disabled>清空选择</button></div><button id="batchDownload" class="button primary" type="button" disabled>批量下载 ZIP</button></div>
+            <p id="downloadSummary" class="field-help">选择已完成任务后，一次下载全部所选音频。</p>
+            <p id="downloadStatus" class="download-status" role="status" aria-live="polite">自动下载已关闭，音频仍保存在项目输出目录。</p>
+          </div>
+        </section>
         <footer class="workspace-footer"><span>本地推理 · 断点续跑 · 逐段核对</span><span id="versionLabel">LOCAL AUDIOBOOK STUDIO</span></footer>
       </div>
     </div>
