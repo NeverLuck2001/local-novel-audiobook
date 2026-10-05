@@ -27,6 +27,10 @@ Download preferences/submission history are separate browser-local state. Automa
 
 ## Cache and recovery
 
+Recognized downloader cleanup is a text-planning policy, enabled by default through `strip_downloader_metadata`. Shaft markers and contiguous header fields are recognized before optional URL removal; an unmarked header requires title/author plus a Pixiv source URL. Processing stops at the first ambiguous prose line. TXT title/author are recovered from the cleanup audit, and removed text is bounded/hash-retained for review. Source files remain immutable; changed speech text receives its existing content-derived segment identity.
+
+List management stores reversible `archived` flags in the file/voice registries and job records. Bulk routes validate all IDs before mutation, accept at most 200 IDs per request and deduplicate them; the browser batches larger selections. Job removal reuses cooperative cancellation and persists `archive_when_stopped` until worker completion, including after a server restart. Restoring a same-name voice archives the other active version, retaining all audio. Restoring records does not automatically launch a worker. Scroll/search/selection are browser view state; downloader search is separate from automatic download eligibility. Existing single-record APIs remain compatible.
+
 Generation identity includes local model identity, relevant package versions, voice/reference identity, text, seed, and sampling parameters. Batch size is an execution policy and does not invalidate completed audio. New pronunciation text creates a distinct segment identity only when the spoken text actually changes.
 
 QC and render identities are separate. A QC threshold change rechecks speech; output rate, pitch, loudness, pauses, and formats reuse raw audio. Neutral new controls are omitted from legacy fingerprint comparisons so an unchanged configuration retains existing caches/exports. SHA256 checks detect corrupted cached audio.

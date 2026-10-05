@@ -115,7 +115,10 @@ def _document_parts(content: bytes, entries: list[tuple[str, str]], title: str, 
 def parse_book(path: Path, cfg: TextConfig) -> Book:
     if path.suffix.lower() == ".txt":
         text, audit = clean_text(_decode(path.read_bytes(), cfg.encoding), cfg)
-        book = Book(path.stem, "", _chapters(text, path.stem, path.name, cfg), audit=audit)
+        metadata = next((record["metadata"] for record in audit
+                         if record.get("operation") == "strip_downloader_metadata"), {})
+        title, author = metadata.get("title") or path.stem, metadata.get("author", "")
+        book = Book(title, author, _chapters(text, title, path.name, cfg), audit=audit)
     elif path.suffix.lower() == ".epub":
         eb = epub.read_epub(str(path), options={"ignore_ncx": False})
         def meta(key, default=""):

@@ -28,6 +28,8 @@ const state = {
   audioUrl: null,
   saved: null,
   showArchived: false,
+  selectedJobs: new Set(),
+  selectedVoices: new Set(),
   monitorOverrides: {},
   downloads: {format: "flac", auto: false, since: null, submitted: {}, selected: new Set(),
     busy: false, autoPaused: false, message: "", error: false},
@@ -191,6 +193,7 @@ async function mutate(message, action, button) {
     updateQueueControls();
     updateSelection();
     updateReferenceControls();
+    updateListControls();
   }
 }
 
@@ -254,6 +257,7 @@ function collectSettings(requireReference = true) {
     },
     text: {
       remove_urls: elements.removeUrls.checked,
+      strip_downloader_metadata: elements.stripDownloaderMetadata.checked,
       strip_front_matter: elements.stripFrontMatter.checked,
       join_wrapped_lines: elements.joinLines.checked,
       remove_line_patterns: elements.removePatterns.value.split(/\r?\n/).map(line => line.trim()).filter(Boolean),
@@ -277,6 +281,7 @@ function collectSettings(requireReference = true) {
     },
   };
   if (!settings.tts.model_path) throw new Error("没有可用的本地合成模型。请先安装模型，再启动界面。");
+  if (!state.info?.features?.downloader_cleanup) delete settings.text.strip_downloader_metadata;
   if (settings.segment.min_chars > settings.segment.target_chars || settings.segment.target_chars > settings.segment.max_chars) {
     throw new Error("段长需要满足：最小段长 ≤ 目标段长 ≤ 最大段长。");
   }
@@ -351,6 +356,7 @@ function applySettings(settings) {
   }
   for (const [id, path, fallback] of [
     ["removeUrls", "text.remove_urls", false],
+    ["stripDownloaderMetadata", "text.strip_downloader_metadata", true],
     ["stripFrontMatter", "text.strip_front_matter", false],
     ["joinLines", "text.join_wrapped_lines", false],
     ["asrCheck", "quality.asr_check", true],
@@ -466,11 +472,13 @@ function renderReferenceClips() {
     const remove = node("button", "text-button", "移除");
     remove.type = "button";
     remove.disabled = Boolean(state.referenceJobId);
-    remove.addEventListener("click", () => {
+    remove.addEventListener("click", () => mutate("正在移除参考素材", async () => {
+      if (state.info?.features?.list_management) await changeRecords("files", [clip.id]);
       state.referenceClips.splice(index, 1);
       referenceChanged();
       renderReferenceClips();
-    });
+      updateListControls();
+    }));
     heading.append(remove);
     card.append(heading);
     if (clip.source_kind === "video") {
@@ -516,15 +524,16 @@ function renderReferenceClips() {
     elements.referenceClips.append(card);
   }
   updateReferenceControls();
+  updateListControls();
 }
 
 async function loadVoiceLibrary() {
   if (!state.info?.features?.voice_library) return;
-  const result = await api("/api/voices");
+  const result = await api("/api/voices?include_archived=true");
   state.voiceProfiles = result.voices || [];
   elements.voiceProfile.replaceChildren(node("option", "", "准备一个新音色"));
   elements.voiceProfile.firstChild.value = "";
-  for (const profile of state.voiceProfiles) {
+  for (const profile of state.voiceProfiles.filter(profile => !profile.archived)) {
     const option = node("option", "", `${profile.name} · ${profile.duration.toFixed(1)} 秒`);
     option.value = profile.id;
     elements.voiceProfile.append(option);
@@ -534,6 +543,7 @@ async function loadVoiceLibrary() {
   const selected = state.voiceProfiles.find(item => item.id === state.voiceProfileId);
   if (selected && !elements.voiceName.value.trim()) elements.voiceName.value = selected.name;
   updateReferenceControls();
+  renderVoices();
 }
 
 function syncReferenceJob() {
@@ -598,6 +608,8 @@ function renderInfo(info) {
   elements.cloneUpgradeNotice.classList.toggle("hidden", preparationAvailable);
   for (const id of ["referencePreparation", "voiceLibrary", "saveVoiceControls"]) elements[id].classList.toggle("hidden", !preparationAvailable);
   elements.referenceInput.multiple = preparationAvailable;
+  elements.stripDownloaderMetadata.disabled = !info.features?.downloader_cleanup;
+  elements.stripDownloaderMetadata.title = info.features?.downloader_cleanup ? "识别明确页头，不依赖章节标题" : "需要重启工作台加载新版本";
   elements.referenceInput.accept = [".wav", ".mp3", ".flac", ".m4a", ".ogg",
     ...(info.features?.reference_video_suffixes || [])].join(",");
   elements.referenceUploadHint.textContent = info.features?.reference_video
@@ -645,48 +657,174 @@ function fileSize(bytes) {
   return `${(amount / 1024 ** 2).toFixed(1)} MB`;
 }
 
-function renderFiles() {
-  elements.fileList.replaceChildren();
-  for (const file of state.files) {
-    const id = String(file.id);
-    const row = node("div", `file-item ${state.selected.has(id) ? "selected" : ""}`);
-    const checkbox = node("input");
-    checkbox.type = "checkbox";
-    checkbox.checked = state.selected.has(id);
-    checkbox.setAttribute("aria-label", `选择 ${file.name}`);
-    checkbox.addEventListener("change", () => {
-      checkbox.checked ? state.selected.add(id) : state.selected.delete(id);
-      invalidatePlan();
-      renderFiles();
-      persistSettings();
-    });
-    const extension = String(file.name).split(".").pop().toUpperCase();
-    const icon = node("span", "file-icon", extension);
-    const copy = node("div", "file-copy");
-    copy.append(node("strong", "", file.name), node("small", "", `${fileSize(file.size)} · ${file.path || "已保存到本地"}`));
-    const remove = node("button", "file-remove", "×");
-    remove.type = "button";
-    remove.title = "从当前列表隐藏，不删除原书稿或已生成音频";
-    remove.setAttribute("aria-label", `隐藏 ${file.name}`);
-    remove.addEventListener("click", () => {
-      state.files = state.files.filter(item => String(item.id) !== id);
-      state.selected.delete(id);
-      invalidatePlan();
-      renderFiles();
-      persistSettings();
-    });
-    row.append(checkbox, icon, copy, remove);
-    elements.fileList.append(row);
+function preserveListView(list, render) {
+  const top = list.scrollTop;
+  const focus = list.contains(document.activeElement) ? document.activeElement.dataset.focusKey : null;
+  render();
+  list.scrollTop = top;
+  if (focus) [...list.querySelectorAll("[data-focus-key]")].find(item => item.dataset.focusKey === focus)?.focus({preventScroll: true});
+}
+
+function visibleFiles() {
+  const query = elements.fileSearch.value.trim().toLocaleLowerCase();
+  return state.files.filter(file => (!file.archived || elements.showArchivedFiles.checked) && String(file.name).toLocaleLowerCase().includes(query));
+}
+
+function selectedBooks() {
+  return state.files.filter(file => !file.archived && state.selected.has(String(file.id)));
+}
+
+async function reloadFiles() {
+  const result = await api("/api/files?include_archived=true");
+  state.files = (result.files || []).filter(file => file.kind !== "reference");
+  state.selected = new Set([...state.selected].filter(id => state.files.some(file => String(file.id) === id)));
+  renderFiles();
+}
+
+async function changeRecords(collection, ids, archived = true) {
+  for (let offset = 0; offset < ids.length; offset += 200) {
+    await api(`/api/${collection}/bulk`, {method: "POST", body: {ids: ids.slice(offset, offset + 200), action: archived ? "archive" : "unarchive"}});
   }
+}
+
+async function changeFiles(ids, archived = true) {
+  await changeRecords("files", ids, archived);
+  ids.forEach(id => state.selected.delete(id));
+  invalidatePlan();
+  await reloadFiles();
+  persistSettings();
+  showNotice(archived ? "书稿记录已删除，原稿和已有任务保留；勾选“显示已删除”可恢复。" : "书稿记录已恢复，可重新选择生成。", "success");
+}
+
+function renderFiles() {
+  const files = visibleFiles();
+  preserveListView(elements.fileList, () => {
+    elements.fileList.replaceChildren();
+    for (const file of files) {
+      const id = String(file.id);
+      const row = node("div", `file-item ${state.selected.has(id) ? "selected" : ""}`);
+      row.classList.toggle("archived", Boolean(file.archived));
+      const checkbox = node("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = state.selected.has(id);
+      checkbox.dataset.focusKey = `file:${id}`;
+      checkbox.setAttribute("aria-label", `选择 ${file.name}`);
+      checkbox.addEventListener("change", () => {
+        checkbox.checked ? state.selected.add(id) : state.selected.delete(id);
+        invalidatePlan();
+        renderFiles();
+        persistSettings();
+      });
+      const icon = node("span", "file-icon", String(file.name).split(".").pop().toUpperCase());
+      const copy = node("div", "file-copy");
+      copy.title = file.path || file.name;
+      copy.append(node("strong", "", file.name), node("small", "", `${fileSize(file.size)} · ${file.archived ? "已删除，可恢复" : file.uploaded ? "已保存本地副本" : "本机书稿"}`));
+      const remove = node("button", "button secondary compact", file.archived ? "恢复" : "删除");
+      remove.type = "button";
+      remove.dataset.focusKey = `file-action:${id}`;
+      remove.disabled = !state.info?.features?.list_management || state.mutation;
+      remove.setAttribute("aria-label", `${file.archived ? "恢复" : "删除"} ${file.name}`);
+      remove.addEventListener("click", () => mutate("正在更新书稿列表", () => changeFiles([id], !file.archived)));
+      row.append(checkbox, icon, copy, remove);
+      elements.fileList.append(row);
+    }
+    if (!files.length) elements.fileList.append(node("p", "list-empty", state.files.length ? "没有匹配的书稿；可以修改搜索或显示已删除记录。" : "还没有书稿，点击上方选择文件。"));
+  });
   updateSelection();
+  updateListControls();
+}
+
+function visibleVoices() {
+  const query = elements.voiceSearch.value.trim().toLocaleLowerCase();
+  return state.voiceProfiles.filter(profile => (!profile.archived || elements.showArchivedVoices.checked) && profile.name.toLocaleLowerCase().includes(query));
+}
+
+function chooseVoice(profile) {
+  if (state.referenceJobId) {
+    elements.voiceProfile.value = state.voiceProfileId;
+    showNotice("请等当前整理完成，或先在任务区取消它。", "info");
+    return;
+  }
+  state.voiceProfileId = profile?.id || "";
+  elements.voiceProfile.value = state.voiceProfileId;
+  state.reference = profile?.reference || null;
+  elements.referenceText.value = profile?.text || "";
+  elements.voiceName.value = profile?.name || "";
+  elements.referenceWarnings.textContent = "";
+  updateReferenceControls();
+  renderVoices();
+  persistSettings();
+}
+
+async function changeVoices(ids, archived = true) {
+  await changeRecords("voices", ids, archived);
+  state.selectedVoices.clear();
+  await loadVoiceLibrary();
+  persistSettings();
+  showNotice(archived ? "音色记录已删除，录音和已有任务保留；可显示已删除音色并恢复。" : "音色已恢复到本地音色库。", "success");
+}
+
+function renderVoices() {
+  const voices = visibleVoices();
+  state.selectedVoices = new Set([...state.selectedVoices].filter(id => voices.some(profile => profile.id === id)));
+  preserveListView(elements.voiceList, () => {
+    elements.voiceList.replaceChildren();
+    for (const profile of voices) {
+      const row = node("div", `managed-row ${profile.id === state.voiceProfileId ? "active" : ""}`);
+      const checkbox = node("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = state.selectedVoices.has(profile.id);
+      checkbox.dataset.focusKey = `voice:${profile.id}`;
+      checkbox.setAttribute("aria-label", `选择音色 ${profile.name}`);
+      checkbox.addEventListener("change", () => {
+        checkbox.checked ? state.selectedVoices.add(profile.id) : state.selectedVoices.delete(profile.id);
+        updateListControls();
+      });
+      const use = node("button", "list-open");
+      use.type = "button";
+      use.disabled = Boolean(profile.archived) || Boolean(state.referenceJobId);
+      use.dataset.focusKey = `voice-open:${profile.id}`;
+      use.append(node("strong", "", profile.name), node("small", "", `${profile.duration.toFixed(1)} 秒 · ${profile.archived ? "已删除" : profile.id === state.voiceProfileId ? "当前使用" : "点击使用"}`));
+      use.addEventListener("click", () => chooseVoice(profile));
+      const remove = node("button", "button secondary compact", profile.archived ? "恢复" : "删除");
+      remove.type = "button";
+      remove.disabled = !state.info?.features?.list_management || state.mutation;
+      remove.addEventListener("click", () => mutate("正在更新音色库", () => changeVoices([profile.id], !profile.archived)));
+      row.append(checkbox, use, remove);
+      elements.voiceList.append(row);
+    }
+    if (!voices.length) elements.voiceList.append(node("p", "list-empty", "没有匹配的已保存音色。整理录音后可保存，或显示已删除音色。"));
+  });
+  updateListControls();
+}
+
+function updateListControls() {
+  const enabled = Boolean(state.info?.features?.list_management) && state.connected && !state.mutation;
+  const selectedFiles = state.files.filter(file => state.selected.has(String(file.id)));
+  const selectedVoices = state.voiceProfiles.filter(profile => state.selectedVoices.has(profile.id));
+  const selectedJobs = allJobs().filter(job => state.selectedJobs.has(job.displayId));
+  for (const [suffix, items] of [["Files", selectedFiles], ["Voices", selectedVoices], ["Jobs", selectedJobs]]) {
+    elements[`remove${suffix}`].disabled = !enabled || !items.some(item => !item.archived);
+    elements[`restore${suffix}`].disabled = !enabled || !items.some(item => item.archived);
+    elements[`clear${suffix}`].disabled = !items.length || state.mutation;
+    elements[`remove${suffix}`].textContent = `删除选中${items.some(item => !item.archived) ? `（${items.filter(item => !item.archived).length}）` : ""}`;
+  }
+  elements.selectFiles.disabled = !visibleFiles().length || state.mutation;
+  elements.selectVoices.disabled = !visibleVoices().length || state.mutation;
+  elements.selectJobs.disabled = !visibleJobs().some(job => !job.readonly || job.archived || job.can_remove) || state.mutation;
+  elements.clearReferences.disabled = !state.referenceClips.length || Boolean(state.referenceJobId) || state.mutation;
+  elements.fileListSummary.textContent = `列表 ${visibleFiles().length} / ${state.files.length} 本 · 已选 ${selectedFiles.length} 本。删除仅移除记录，原文件保留。`;
+  elements.voiceListSummary.textContent = `列表 ${visibleVoices().length} 个音色 · 已选 ${selectedVoices.length} 个。删除后可恢复。`;
+  elements.jobListSummary.textContent = `列表 ${visibleJobs().length} 个任务 · 已选 ${selectedJobs.length} 个。运行中的任务会先安全取消，再删除记录；音频保留。`;
 }
 
 function updateSelection() {
-  const count = state.selected.size;
+  const count = selectedBooks().length;
   elements.fileCount.textContent = `${count} 本已选`;
   elements.selectionSummary.textContent = count ? `已选择 ${count} 本小说${state.plan ? "，检查结果已准备。" : "，请先检查正文。"}` : "选择书稿后，先检查正文。";
-  elements.planButton.disabled = !count || state.mutation || !state.connected;
-  elements.startButton.disabled = !count || !state.plan || state.mutation || !state.connected;
+  if (count > 100) elements.selectionSummary.textContent = `已选 ${count} 本；单次最多安排 100 本，请分批检查并加入队列。`;
+  elements.planButton.disabled = !count || count > 100 || state.mutation || !state.connected;
+  elements.startButton.disabled = !count || count > 100 || !state.plan || state.mutation || !state.connected;
   elements.previewButton.disabled = state.mutation || !state.connected;
 }
 
@@ -698,7 +836,7 @@ function invalidatePlan() {
 }
 
 function planSignature(settings) {
-  return JSON.stringify({files: [...state.selected].sort(), segment: settings.segment, text: settings.text, chapters: settings.chapters || ""});
+  return JSON.stringify({files: selectedBooks().map(file => String(file.id)).sort(), segment: settings.segment, text: settings.text, chapters: settings.chapters || ""});
 }
 
 function addFiles(files) {
@@ -745,6 +883,7 @@ const auditLabels = {
   spoken_chars: "朗读字符",
   warnings: "提醒",
   remove_urls: "移除网址",
+  strip_downloader_metadata: "自动清理下载器页头（书名和作者保留为元数据）",
   remove_user_matching_lines: "按规则移除整行",
   strip_front_matter: "移除章节前说明",
   remove_controls: "清理控制字符",
@@ -864,7 +1003,7 @@ function renderPlan(plan) {
 async function analyzeFiles() {
   await mutate("正在解析章节与检查朗读稿", async () => {
     const settings = collectSettings(false);
-    const result = await api("/api/plan", {method: "POST", body: {files: [...state.selected], settings}});
+    const result = await api("/api/plan", {method: "POST", body: {files: selectedBooks().map(file => String(file.id)), settings}});
     if (!result.books?.length) throw new Error("没有找到可以朗读的正文。请检查文件内容与清理设置。");
     state.plan = result;
     state.planSignature = planSignature(settings);
@@ -881,7 +1020,7 @@ async function startJob(kind) {
       invalidatePlan();
       throw new Error("书稿或清理设置已变更，请重新检查文本与章节。");
     }
-    const request = {kind, settings, files: kind === "preview" ? [] : [...state.selected]};
+    const request = {kind, settings, files: kind === "preview" ? [] : selectedBooks().map(file => String(file.id))};
     if (kind === "preview") {
       request.preview_text = elements.previewText.value.trim();
       if (!request.preview_text) throw new Error("请先填写一段试听文字。");
@@ -963,36 +1102,83 @@ function updateQueueControls() {
   elements.cancelQueued.textContent = waitingCount ? `取消全部排队任务（${waitingCount}）` : "取消全部排队任务";
 }
 
+function visibleJobs() {
+  const query = elements.jobSearch.value.trim().toLocaleLowerCase();
+  const filter = elements.jobFilter.value;
+  return allJobs().filter(job => jobTitle(job).toLocaleLowerCase().includes(query) &&
+    (filter === "all" || (filter === "queued" ? job.status === "queued" : filter === "active" ?
+      ["running", "preparing", "pausing", "cancelling", "stopping"].includes(job.status) :
+      ["completed", "failed", "paused", "cancelled"].includes(job.status))));
+}
+
+async function changeJobs(ids, restore = false) {
+  const jobs = allJobs().filter(job => ids.includes(job.displayId) && Boolean(job.archived) === restore);
+  const owned = jobs.filter(job => !job.readonly).map(job => String(job.id));
+  const external = jobs.filter(job => job.readonly);
+  if (!restore && external.some(job => !(job.can_remove ?? !state.queueBlocked))) throw new Error("原窗口仍在运行，请先停止它，再删除原有任务记录。");
+  for (let offset = 0; offset < owned.length; offset += 200) {
+    await api("/api/jobs/bulk", {method: "POST", body: {ids: owned.slice(offset, offset + 200), action: restore ? "unarchive" : "remove"}});
+  }
+  for (const job of external) await api(`/api/monitor/${encodeURIComponent(job.id)}/${restore ? "unarchive" : "archive"}`, {method: "POST"});
+  ids.forEach(id => state.selectedJobs.delete(id));
+  await refresh(true);
+  showNotice(restore ? "选中的任务记录已恢复。" : "已提交删除；运行中的任务会在安全结束后移出列表，原稿和音频保留。", "success");
+}
+
 function renderJobs() {
-  const jobs = allJobs();
+  const jobs = visibleJobs();
+  state.selectedJobs = new Set([...state.selectedJobs].filter(id => jobs.some(job => job.displayId === id)));
   if (!jobs.some(job => job.displayId === state.activeId)) {
     const active = jobs.find(job => job.status === "running") || jobs.find(job => job.status === "queued") || jobs[0];
     state.activeId = active?.displayId || null;
     state.detail = null;
   }
-  elements.jobList.replaceChildren();
   const queuedCount = state.jobs.filter(job => ["running", "queued", "preparing", "pausing", "cancelling", "stopping"].includes(job.status)).length;
   updateQueueControls();
-  elements.queueCount.textContent = queuedCount ? `${queuedCount} 个任务进行中` : jobs.length ? `${jobs.length} 个任务` : "队列为空";
+  elements.queueCount.textContent = queuedCount ? `${queuedCount} 个任务进行中` : allJobs().length ? `${allJobs().length} 个任务` : "队列为空";
   elements.emptyJobs.classList.toggle("hidden", jobs.length > 0);
   elements.externalNotice.classList.toggle("hidden", !state.queueBlocked && !state.external.some(job => ["running", "preparing"].includes(job.status)));
-  for (const job of jobs) {
-    const button = node("button", `job-tab ${state.activeId === job.displayId ? "active" : ""}`);
-    button.type = "button";
-    const progress = metrics(job);
-    const percentage = progress.percent === null ? "" : ` · ${progress.percent.toFixed(0)}%`;
-    const queueLabel = job.queue_position ? ` · 队列第 ${job.queue_position} 位` : "";
-    button.append(node("strong", "", jobTitle(job)), node("small", "", `${job.readonly ? "原有任务 · " : ""}${statuses[job.status] || job.status || "状态未知"}${percentage}${queueLabel}${job.archived ? " · 已删除记录" : ""}`));
-    button.setAttribute("aria-pressed", String(state.activeId === job.displayId));
-    button.addEventListener("click", async () => {
-      state.activeId = job.displayId;
-      state.detail = null;
-      renderJobs();
-      await refreshActiveDetail();
-    });
-    elements.jobList.append(button);
-  }
+  preserveListView(elements.jobList, () => {
+    elements.jobList.replaceChildren();
+    for (const job of jobs) {
+      const row = node("div", `managed-row ${state.activeId === job.displayId ? "active" : ""}`);
+      const checkbox = node("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = state.selectedJobs.has(job.displayId);
+      checkbox.disabled = Boolean(job.readonly && !job.archived && !(job.can_remove ?? !state.queueBlocked));
+      checkbox.dataset.focusKey = `job:${job.displayId}`;
+      checkbox.setAttribute("aria-label", `选择任务 ${jobTitle(job)}`);
+      checkbox.addEventListener("change", () => {
+        checkbox.checked ? state.selectedJobs.add(job.displayId) : state.selectedJobs.delete(job.displayId);
+        updateListControls();
+      });
+      const button = node("button", `list-open job-tab ${state.activeId === job.displayId ? "active" : ""}`);
+      button.type = "button";
+      button.dataset.focusKey = `job-open:${job.displayId}`;
+      const progress = metrics(job);
+      const percentage = progress.percent === null ? "" : ` · ${progress.percent.toFixed(0)}%`;
+      const queueLabel = job.queue_position ? ` · 第 ${job.queue_position} 位` : "";
+      button.append(node("strong", "", jobTitle(job)), node("small", "", `${statuses[job.status] || job.status || "状态未知"}${percentage}${queueLabel}${job.archived ? " · 已删除" : ""}${job.archive_when_stopped ? " · 等待删除" : ""}`));
+      button.setAttribute("aria-pressed", String(state.activeId === job.displayId));
+      button.addEventListener("click", async () => {
+        state.activeId = job.displayId;
+        state.detail = null;
+        renderJobs();
+        await refreshActiveDetail();
+      });
+      const remove = node("button", "button secondary compact", job.archived ? "恢复" : "删除");
+      remove.type = "button";
+      remove.dataset.focusKey = `job-action:${job.displayId}`;
+      remove.disabled = !state.info?.features?.list_management || state.mutation || checkbox.disabled || Boolean(job.archive_when_stopped);
+      remove.setAttribute("aria-label", `${job.archived ? "恢复" : "删除"}任务 ${jobTitle(job)}`);
+      remove.addEventListener("click", () => mutate("正在更新任务记录", () => changeJobs([job.displayId], Boolean(job.archived))));
+      row.append(checkbox, button, remove);
+      elements.jobList.append(row);
+    }
+    if (!jobs.length) elements.jobList.append(node("p", "list-empty", "没有匹配的任务。可修改搜索、状态或显示已删除记录。"));
+  });
   renderJobDetail();
+  updateListControls();
 }
 
 function safeExportUrl(url) {
@@ -1087,11 +1273,17 @@ function queueBusy() {
   return state.jobs.some(job => ["running", "queued", "preparing", "pausing", "cancelling", "stopping"].includes(job.status));
 }
 
+function visibleDownloadJobs() {
+  const query = elements.downloadSearch.value.trim().toLocaleLowerCase();
+  return downloadableJobs().filter(job => jobTitle(job).toLocaleLowerCase().includes(query));
+}
+
 function renderDownloads() {
   const downloads = state.downloads;
   const supported = Boolean(state.info?.features?.batch_download);
-  const jobs = downloadableJobs();
+  const jobs = visibleDownloadJobs();
   const focusedJob = document.activeElement?.dataset.downloadJob;
+  const scrollTop = elements.downloadList.scrollTop;
   downloads.selected = new Set([...downloads.selected].filter(id => jobs.some(job => String(job.id) === id)));
   elements.downloadFormat.value = downloads.format;
   elements.autoDownload.checked = downloads.auto;
@@ -1125,11 +1317,13 @@ function renderDownloads() {
   }
   if (!jobs.length) elements.downloadList.append(node("p", "field-help", `还没有已完成的 ${downloads.format.toUpperCase()} 音频任务。完成后会出现在这里；已删除记录需先勾选“显示已删除记录”。`));
   if (focusedJob) [...elements.downloadList.querySelectorAll("input")].find(input => input.dataset.downloadJob === focusedJob)?.focus({preventScroll: true});
+  elements.downloadList.scrollTop = scrollTop;
   const selected = jobs.filter(job => downloads.selected.has(String(job.id)));
   const files = selected.flatMap(job => downloadFiles(job));
   const size = files.reduce((sum, item) => sum + (Number(item.size) || 0), 0);
   elements.selectDownloads.disabled = !jobs.length || downloads.busy;
   elements.clearDownloads.disabled = !selected.length || downloads.busy;
+  elements.removeDownloads.disabled = !selected.some(job => !job.archived) || downloads.busy || state.mutation || !state.info?.features?.list_management;
   elements.batchDownload.disabled = !selected.length || selected.length > 100 || downloads.busy || !supported || !state.connected;
   elements.selectDownloads.textContent = jobs.length > 100 ? "选择前 100 项" : "选择全部";
   elements.batchDownload.textContent = downloads.busy ? "正在准备下载…" : selected.length ? `批量下载 ZIP（${selected.length}）` : "批量下载 ZIP";
@@ -1370,7 +1564,7 @@ async function refresh(force = false) {
     if (state.connected && !state.info) {
       try {
         renderInfo(await api("/api/info"));
-        const files = await api("/api/files");
+        const files = await api("/api/files?include_archived=true");
         state.files = (files.files || []).filter(file => file.kind !== "reference");
         renderFiles();
       } catch (_) {
@@ -1395,6 +1589,30 @@ async function refresh(force = false) {
 }
 
 function attachEvents() {
+  elements.fileSearch.addEventListener("input", renderFiles);
+  elements.showArchivedFiles.addEventListener("change", renderFiles);
+  elements.selectFiles.addEventListener("click", () => { visibleFiles().forEach(file => state.selected.add(String(file.id))); invalidatePlan(); renderFiles(); persistSettings(); });
+  elements.clearFiles.addEventListener("click", () => { state.selected.clear(); invalidatePlan(); renderFiles(); persistSettings(); });
+  for (const [id, archived] of [["removeFiles", true], ["restoreFiles", false]]) elements[id].addEventListener("click", () => mutate("正在更新书稿记录", () => changeFiles(state.files.filter(file => state.selected.has(String(file.id)) && Boolean(file.archived) !== archived).map(file => String(file.id)), archived)));
+  elements.jobSearch.addEventListener("input", renderJobs);
+  elements.jobFilter.addEventListener("change", renderJobs);
+  elements.selectJobs.addEventListener("click", () => { state.selectedJobs = new Set(visibleJobs().filter(job => !job.readonly || job.archived || (job.can_remove ?? !state.queueBlocked)).map(job => job.displayId)); renderJobs(); });
+  elements.clearJobs.addEventListener("click", () => { state.selectedJobs.clear(); renderJobs(); });
+  for (const [id, restore] of [["removeJobs", false], ["restoreJobs", true]]) elements[id].addEventListener("click", () => mutate("正在更新任务记录", () => changeJobs([...state.selectedJobs], restore)));
+  elements.voiceSearch.addEventListener("input", renderVoices);
+  elements.showArchivedVoices.addEventListener("change", renderVoices);
+  elements.selectVoices.addEventListener("click", () => { state.selectedVoices = new Set(visibleVoices().map(profile => profile.id)); renderVoices(); });
+  elements.clearVoices.addEventListener("click", () => { state.selectedVoices.clear(); renderVoices(); });
+  for (const [id, archived] of [["removeVoices", true], ["restoreVoices", false]]) elements[id].addEventListener("click", () => mutate("正在更新音色记录", () => changeVoices(state.voiceProfiles.filter(profile => state.selectedVoices.has(profile.id) && Boolean(profile.archived) !== archived).map(profile => profile.id), archived)));
+  elements.clearReferences.addEventListener("click", () => mutate("正在移除参考素材", async () => {
+    if (state.info?.features?.list_management) await changeRecords("files", state.referenceClips.map(clip => clip.id));
+    state.referenceClips = [];
+    referenceChanged();
+    renderReferenceClips();
+  }));
+  elements.downloadSearch.addEventListener("input", renderDownloads);
+  elements.removeDownloads.addEventListener("click", () => mutate("正在删除下载任务记录", () => changeJobs([...state.downloads.selected])));
+
   elements.downloadFormat.addEventListener("change", () => {
     state.downloads.format = elements.downloadFormat.value;
     state.downloads.since = Date.now();
@@ -1415,7 +1633,7 @@ function attachEvents() {
     renderDownloads();
   });
   elements.selectDownloads.addEventListener("click", () => {
-    state.downloads.selected = new Set(downloadableJobs().slice(0, 100).map(job => String(job.id)));
+    state.downloads.selected = new Set(visibleDownloadJobs().slice(0, 100).map(job => String(job.id)));
     renderDownloads();
   });
   elements.clearDownloads.addEventListener("click", () => {
@@ -1500,21 +1718,7 @@ function attachEvents() {
     await refresh(true);
     showNotice("录音整理已进入队列。完成后校对文字、保存音色，再生成新内容试听。", "success");
   }, elements.prepareReference));
-  elements.voiceProfile.addEventListener("change", () => {
-    const profile = state.voiceProfiles.find(item => item.id === elements.voiceProfile.value);
-    if (state.referenceJobId) {
-      elements.voiceProfile.value = state.voiceProfileId;
-      showNotice("请等当前整理完成，或先在任务区取消它。", "info");
-      return;
-    }
-    state.voiceProfileId = profile?.id || "";
-    state.reference = profile?.reference || null;
-    elements.referenceText.value = profile?.text || "";
-    elements.voiceName.value = profile?.name || "";
-    elements.referenceWarnings.textContent = "";
-    updateReferenceControls();
-    persistSettings();
-  });
+  elements.voiceProfile.addEventListener("change", () => chooseVoice(state.voiceProfiles.find(profile => !profile.archived && profile.id === elements.voiceProfile.value)));
   elements.saveVoice.addEventListener("click", () => mutate("正在保存本地音色", async () => {
     const profile = await api("/api/voices", {method: "POST", body: {name: elements.voiceName.value.trim(), reference_id: state.reference.id, text: elements.referenceText.value.trim()}});
     state.voiceProfileId = profile.id;
@@ -1523,13 +1727,7 @@ function attachEvents() {
     persistSettings();
     showNotice("音色已保存在本机，下次可直接选择。请先生成新内容试听。", "success");
   }, elements.saveVoice));
-  elements.archiveVoice.addEventListener("click", () => mutate("正在移出音色库", async () => {
-    await api(`/api/voices/${encodeURIComponent(state.voiceProfileId)}/archive`, {method: "POST"});
-    state.voiceProfileId = "";
-    await loadVoiceLibrary();
-    persistSettings();
-    showNotice("已移出音色库。当前参考录音和已有任务音频会保留。", "success");
-  }, elements.archiveVoice));
+  elements.archiveVoice.addEventListener("click", () => mutate("正在更新音色库", () => changeVoices([state.voiceProfileId]), elements.archiveVoice));
   for (const input of [elements.voiceName, elements.referenceText]) input.addEventListener("input", () => { updateReferenceControls(); persistSettings(); });
   for (const event of ["dragenter", "dragover"]) elements.dropZone.addEventListener(event, event => {
     event.preventDefault();
@@ -1559,7 +1757,7 @@ function attachEvents() {
     }
     persistSettings();
   }));
-  const planInputs = new Set(["removeUrls", "stripFrontMatter", "joinLines", "removePatterns", "pronunciation", "chapters", "targetChars", "maxChars", "minChars"]);
+  const planInputs = new Set(["stripDownloaderMetadata", "removeUrls", "stripFrontMatter", "joinLines", "removePatterns", "pronunciation", "chapters", "targetChars", "maxChars", "minChars"]);
   document.querySelectorAll(".settings-panel input,.settings-panel select,.settings-panel textarea,.cleaning-options input,.cleaning-options textarea").forEach(input => {
     input.addEventListener("input", () => {
       updateRangeLabels();
@@ -1595,7 +1793,7 @@ async function initialize() {
   loadSavedSettings();
   loadDownloadSettings();
   attachEvents();
-  const results = await Promise.allSettled([api("/api/info"), api("/api/files")]);
+  const results = await Promise.allSettled([api("/api/info"), api("/api/files?include_archived=true")]);
   if (results[0].status === "fulfilled") {
     renderInfo(results[0].value);
     setConnected(true);

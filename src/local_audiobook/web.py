@@ -57,6 +57,16 @@ class DownloadRequest(BaseModel):
     format: DownloadFormat = "flac"
 
 
+class RecordRequest(BaseModel):
+    ids: list[DownloadId] = Field(min_length=1, max_length=200)
+    action: Literal["archive", "unarchive"] = "archive"
+
+
+class BulkJobRequest(BaseModel):
+    ids: list[DownloadId] = Field(min_length=1, max_length=200)
+    action: Literal["remove", "unarchive", "cancel"] = "remove"
+
+
 def create_app(app_root: Path | None = None, workspace: Path | None = None) -> FastAPI:
     root = (app_root or Path(__file__).resolve().parents[2]).resolve()
     manager = JobManager(root, workspace)
@@ -110,8 +120,12 @@ def create_app(app_root: Path | None = None, workspace: Path | None = None) -> F
         return manager.info()
 
     @app.get("/api/files")
-    def files():
-        return {"files": manager.list_files()}
+    def files(include_archived: bool = False):
+        return {"files": manager.list_files(include_archived)}
+
+    @app.post("/api/files/bulk")
+    def archive_files(selection: RecordRequest):
+        return manager.archive_records("files", selection.ids, selection.action == "archive")
 
     async def save_upload(file: UploadFile, reference=False):
         suffix = Path(file.filename or "").suffix.lower()
@@ -163,8 +177,12 @@ def create_app(app_root: Path | None = None, workspace: Path | None = None) -> F
         return FileResponse(item["path"], filename=filename)
 
     @app.get("/api/voices")
-    def voices():
-        return {"voices": manager.list_voices()}
+    def voices(include_archived: bool = False):
+        return {"voices": manager.list_voices(include_archived)}
+
+    @app.post("/api/voices/bulk")
+    def archive_voices(selection: RecordRequest):
+        return manager.archive_records("voices", selection.ids, selection.action == "archive")
 
     @app.post("/api/voices")
     def save_voice(selection: VoiceRequest):
@@ -207,6 +225,10 @@ def create_app(app_root: Path | None = None, workspace: Path | None = None) -> F
     @app.get("/api/jobs")
     def jobs():
         return {"jobs": manager.list_jobs()}
+
+    @app.post("/api/jobs/bulk")
+    def bulk_jobs(selection: BulkJobRequest):
+        return manager.bulk_jobs(selection.ids, selection.action)
 
     @app.post("/api/queue/cancel")
     def cancel_queued():
