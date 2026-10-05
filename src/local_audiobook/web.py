@@ -1,23 +1,27 @@
 """Loopback-only HTTP interface for the offline audiobook queue."""
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 import threading
-from typing import Annotated
-from urllib.parse import urlsplit
+from typing import Annotated, Literal
+from urllib.parse import urlencode, urlsplit
 import uuid
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .downloads import stream_zip
 from .jobs import BOOK_SUFFIXES, JobManager, REFERENCE_SUFFIXES
 from .util import safe_name
 
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024
 MAX_REFERENCE_UPLOAD_BYTES = 64 * 1024 * 1024
 PICKER_LOCK = threading.Lock()
+DownloadId = Annotated[str, Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")]
+DownloadFormat = Literal["flac", "m4b", "mp3", "wav"]
 
 
 class Selection(BaseModel):
@@ -45,6 +49,11 @@ class VoiceRequest(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     reference_id: str = Field(min_length=1, max_length=64)
     text: str = Field(min_length=1, max_length=12000)
+
+
+class DownloadRequest(BaseModel):
+    jobs: list[DownloadId] = Field(min_length=1, max_length=100)
+    format: DownloadFormat = "flac"
 
 
 def create_app(app_root: Path | None = None, workspace: Path | None = None) -> FastAPI:
@@ -218,6 +227,24 @@ def create_app(app_root: Path | None = None, workspace: Path | None = None) -> F
         media_type = {".m4b": "audio/mp4", ".mp3": "audio/mpeg", ".wav": "audio/wav",
                       ".flac": "audio/flac"}[path.suffix.lower()]
         return FileResponse(path, filename=path.name, media_type=media_type)
+
+    @app.post("/api/downloads")
+    def prepare_download(selection: DownloadRequest):
+        records = manager.download_records(selection.jobs, selection.format)
+        identifiers = list(dict.fromkeys(selection.jobs))
+        query = urlencode([("format", selection.format), *[("job", item) for item in identifiers]])
+        return {"url": "/api/downloads?" + query, "jobs": len(identifiers),
+                "files": len(records), "size": sum(record["size"] for record in records)}
+
+    @app.get("/api/downloads")
+    def download(job: Annotated[list[DownloadId], Query(min_length=1, max_length=100)],
+                 format: DownloadFormat = "flac"):
+        records = manager.download_records(job, format)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        name = f"audiobooks-{format}-{stamp}.zip"
+        return StreamingResponse(stream_zip(records), media_type="application/zip",
+                                 headers={"Content-Disposition": f'attachment; filename="{name}"',
+                                          "Cache-Control": "no-store"})
 
     static = Path(__file__).with_name("web")
     if static.is_dir():

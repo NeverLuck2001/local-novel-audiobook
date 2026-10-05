@@ -214,7 +214,7 @@ class JobManager:
                 "hardware": self.hardware(),
                 "features": {"native_picker": True, "preview": True, "pause": True,
                              "cancel": True, "queue_ordering": True, "archive": True,
-                             "monitor_archive": True,
+                             "monitor_archive": True, "batch_download": True,
                               "reference_preparation": True, "voice_library": True,
                               "reference_asr": (self.default_config.quality.asr_python.is_file()
                                                 and (self.default_config.quality.asr_model_path / "config.json").is_file()),
@@ -1064,6 +1064,45 @@ class JobManager:
         if not match:
             raise KeyError(file_id)
         return Path(match["path"])
+
+    def download_records(self, identifiers: list[str], audio_format: str) -> list[dict]:
+        """Select completed, registered exports; callers never supply file paths."""
+        if audio_format not in {"flac", "m4b", "mp3", "wav"}:
+            raise ValueError("Select FLAC, M4B, MP3 or WAV for downloading")
+        identifiers = list(dict.fromkeys(identifiers))
+        if not 1 <= len(identifiers) <= 100:
+            raise ValueError("Select between 1 and 100 completed jobs")
+        with self.lock:
+            jobs = []
+            for identifier in identifiers:
+                if identifier not in self.jobs:
+                    raise KeyError(identifier)
+                job = dict(self.jobs[identifier])
+                if job["status"] != "completed" or job.get("kind") == "reference":
+                    raise ValueError("Only completed audio jobs can be bundled")
+                jobs.append(job)
+        records = []
+        for job in jobs:
+            summaries = [self._summary(path.parent) for path in sorted(Path(job["work_root"]).glob("*/plan.json"))]
+            seen = set()
+            selected = []
+            root = Path(job["output_root"]).resolve()
+            for item in self._media_records(job, summaries):
+                path = Path(item["path"]).resolve()
+                if path.suffix.lower() != "." + audio_format or item["id"] in seen:
+                    continue
+                seen.add(item["id"])
+                relative = path.relative_to(root)
+                archive_name = "task_" + safe_name(job["id"]) + "/" + relative.as_posix()
+                stat = path.stat()
+                selected.append({**item, "path": str(path), "archive_name": archive_name,
+                                 "size": stat.st_size, "mtime_ns": stat.st_mtime_ns})
+            if not selected:
+                raise ValueError("A selected job has no exports in the requested format")
+            records.extend(selected)
+            if len(records) > 20000:
+                raise ValueError("Select fewer jobs; a bundle can contain at most 20000 audio files")
+        return records
 
     def _legacy_paths(self) -> list[Path]:
         legacy = self.workspace / "work"

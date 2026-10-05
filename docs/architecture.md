@@ -10,6 +10,10 @@ The project is a small Python orchestration layer around official Qwen inference
 
 ## Data flow
 
+`downloads.py` streams ZIP_STORED entries through a bounded audio buffer and the HTTP response, retaining ZIP64 support without an archive-sized temporary file or browser Blob. `JobManager.download_records` accepts completed studio job IDs and an existing audio format, reuses the media allowlist, deduplicates exports and keeps task-relative output paths. POST `/api/downloads` validates the selection and returns metadata plus a GET URL; GET validates again before starting the attachment. Requests are bounded to 100 jobs/20,000 files, and streaming checks source size/mtime. Disconnect cleanup closes the iterator and source handles. Existing loopback/origin checks apply to both endpoints.
+
+Download preferences/submission history are separate browser-local state. Automatic collection is opt-in, uses an activation timestamp, excludes preview/reference jobs and waits for the studio queue to become idle. The enabled page continues polling while hidden, subject to browser scheduling; a later visit can collect eligible results finished while closed. Web Locks serialize submission where supported, with persisted history checked under the lock. A submission is not proof of download completion; manual ZIP/per-file links allow retry. Source/job/cache/queue state is read-only during downloading.
+
 1. Select/upload a book and preview chapters, cleanup, and segment counts without loading a model.
 2. Create an immutable input copy and validated per-job configuration snapshot.
 3. Wait for any identified external conversion and for the studio's active job.
